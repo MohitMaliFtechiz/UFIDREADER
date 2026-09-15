@@ -1,0 +1,1265 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>UHF Reader Platform SRS</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Serif:ital,wght@0,400;0,500;1,400&display=swap">
+<style>
+:root{
+  --ground:#F2F6F6; --surface:#FFFFFF; --surface-2:#E8F0F0; --surface-3:#DCE8E8;
+  --ink:#0F1A1D; --ink-2:#2C3E43; --muted:#5F7378;
+  --line:#D2DEDF; --line-strong:#AEC3C5;
+  --accent:#0E6B72; --accent-ink:#0A4F55; --accent-soft:#D7EBEC;
+  --amber:#9A5A15; --amber-soft:#F7E8D2;
+  --green:#2A6647; --green-soft:#D9EADF;
+  --red:#8E2E2C; --red-soft:#F6DDDB;
+  --shadow:0 1px 2px rgba(15,26,29,.06), 0 6px 18px rgba(15,26,29,.05);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0B1214; --surface:#111C1F; --surface-2:#17262A; --surface-3:#1E3135;
+    --ink:#E3ECED; --ink-2:#BCCED0; --muted:#89A0A4;
+    --line:#21353A; --line-strong:#2F474C;
+    --accent:#58BDC4; --accent-ink:#8FD6DB; --accent-soft:#0E3439;
+    --amber:#DFA055; --amber-soft:#36270F;
+    --green:#74C79A; --green-soft:#0F2E1F;
+    --red:#E59692; --red-soft:#381816;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0B1214; --surface:#111C1F; --surface-2:#17262A; --surface-3:#1E3135;
+  --ink:#E3ECED; --ink-2:#BCCED0; --muted:#89A0A4;
+  --line:#21353A; --line-strong:#2F474C;
+  --accent:#58BDC4; --accent-ink:#8FD6DB; --accent-soft:#0E3439;
+  --amber:#DFA055; --amber-soft:#36270F;
+  --green:#74C79A; --green-soft:#0F2E1F;
+  --red:#E59692; --red-soft:#381816;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.3);
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:"IBM Plex Serif",Georgia,serif;
+  font-size:16px; line-height:1.62; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{display:grid; grid-template-columns:262px minmax(0,1fr); gap:0; max-width:1380px; margin:0 auto;}
+
+/* ---- sidebar ---- */
+.side{
+  border-right:1px solid var(--line); background:var(--surface);
+  position:sticky; top:0; height:100vh; overflow-y:auto;
+  padding:28px 20px 40px; font-family:"IBM Plex Sans",system-ui,sans-serif;
+}
+.side .mark{font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--accent); font-weight:600;}
+.side h2{font-size:15px; margin:6px 0 20px; line-height:1.3; font-weight:600; color:var(--ink);}
+.side nav{display:flex; flex-direction:column; gap:1px;}
+.side a{
+  color:var(--ink-2); text-decoration:none; font-size:13px; padding:5px 9px;
+  border-radius:4px; display:flex; gap:9px; line-height:1.4;
+}
+.side a:hover{background:var(--surface-2); color:var(--accent-ink);}
+.side a .n{font-family:"IBM Plex Mono",monospace; font-size:11px; color:var(--muted);
+  min-width:20px; padding-top:1px; font-variant-numeric:tabular-nums;}
+.side .grp{font-family:"IBM Plex Mono",monospace; font-size:10px; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--muted); margin:18px 0 6px 9px;}
+
+/* ---- main ---- */
+main{padding:56px 52px 120px; min-width:0;}
+.col{max-width:78ch;}
+h1{font-family:"IBM Plex Sans",sans-serif; font-size:40px; line-height:1.12; font-weight:700;
+  margin:0 0 12px; letter-spacing:-.022em; text-wrap:balance;}
+h2{font-family:"IBM Plex Sans",sans-serif; font-size:25px; font-weight:650; line-height:1.24;
+  margin:64px 0 4px; letter-spacing:-.014em; text-wrap:balance; scroll-margin-top:24px;}
+h3{font-family:"IBM Plex Sans",sans-serif; font-size:17.5px; font-weight:600; line-height:1.35;
+  margin:38px 0 10px; letter-spacing:-.006em; text-wrap:balance; scroll-margin-top:24px;}
+h4{font-family:"IBM Plex Sans",sans-serif; font-size:14px; font-weight:600;
+  margin:26px 0 8px; color:var(--ink-2);}
+h2 .sn, h3 .sn{font-family:"IBM Plex Mono",monospace; color:var(--accent);
+  font-weight:500; margin-right:.6em; font-size:.78em; letter-spacing:0;}
+p{margin:0 0 15px;}
+ul,ol{margin:0 0 15px; padding-left:22px;}
+li{margin-bottom:6px;}
+a{color:var(--accent-ink);}
+strong{font-weight:600; color:var(--ink);}
+em{color:var(--ink-2);}
+hr{border:0; border-top:1px solid var(--line); margin:56px 0;}
+
+.lede{font-size:18.5px; line-height:1.55; color:var(--ink-2); margin-bottom:26px;}
+.meta{
+  font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--muted);
+  display:flex; flex-wrap:wrap; gap:6px 22px; padding:14px 0 0;
+  border-top:1px solid var(--line); margin-top:26px;
+}
+.meta b{color:var(--ink-2); font-weight:500;}
+
+/* ---- code ---- */
+pre{
+  background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--accent);
+  border-radius:3px; padding:15px 17px; overflow-x:auto; margin:0 0 18px;
+  font-family:"IBM Plex Mono",monospace; font-size:12.6px; line-height:1.62; color:var(--ink-2);
+}
+code{font-family:"IBM Plex Mono",monospace; font-size:.875em; background:var(--surface-2);
+  padding:1px 5px; border-radius:3px; color:var(--accent-ink);}
+pre code{background:none; padding:0; color:inherit; font-size:inherit;}
+.cm{color:var(--muted); font-style:italic;}
+.kw{color:var(--accent);}
+
+/* ---- tables ---- */
+.tw{overflow-x:auto; margin:0 0 20px; border:1px solid var(--line); border-radius:4px; background:var(--surface);}
+table{border-collapse:collapse; width:100%; font-family:"IBM Plex Sans",sans-serif;
+  font-size:13.2px; font-variant-numeric:tabular-nums;}
+th{
+  text-align:left; font-weight:600; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--muted); padding:10px 13px; border-bottom:1px solid var(--line-strong);
+  background:var(--surface-2); white-space:nowrap;
+}
+td{padding:9px 13px; border-bottom:1px solid var(--line); vertical-align:top; line-height:1.48;}
+tr:last-child td{border-bottom:none;}
+td.id,td.mono,th.mono{font-family:"IBM Plex Mono",monospace; font-size:12px; white-space:nowrap;}
+td.id{color:var(--accent-ink); font-weight:500;}
+table.req td:nth-child(2){min-width:23em;}
+
+/* ---- chips ---- */
+.chip{
+  display:inline-block; font-family:"IBM Plex Mono",monospace; font-size:10px; font-weight:500;
+  letter-spacing:.05em; text-transform:uppercase; padding:2px 7px; border-radius:3px;
+  white-space:nowrap; border:1px solid transparent;
+}
+.chip.v{background:var(--green-soft); color:var(--green); border-color:var(--green);}
+.chip.d{background:var(--accent-soft); color:var(--accent-ink); border-color:var(--accent);}
+.chip.u{background:var(--amber-soft); color:var(--amber); border-color:var(--amber);}
+.chip.p1{background:var(--red-soft); color:var(--red); border-color:var(--red);}
+.chip.p2{background:var(--surface-3); color:var(--ink-2); border-color:var(--line-strong);}
+.chip.p3{background:transparent; color:var(--muted); border-color:var(--line-strong);}
+
+/* ---- callouts ---- */
+.note{
+  border:1px solid var(--line); border-left:3px solid var(--amber);
+  background:var(--surface); border-radius:3px; padding:14px 18px; margin:0 0 20px;
+}
+.note.measured{border-left-color:var(--green);}
+.note.hard{border-left-color:var(--red);}
+.note .t{
+  font-family:"IBM Plex Sans",sans-serif; font-size:10.5px; font-weight:600; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--amber); margin-bottom:5px; display:block;
+}
+.note.measured .t{color:var(--green);}
+.note.hard .t{color:var(--red);}
+.note p:last-child{margin-bottom:0;}
+.note p{font-size:14.6px;}
+
+/* ---- legend ---- */
+.legend{display:grid; grid-template-columns:repeat(3,1fr); gap:1px;
+  background:var(--line); border:1px solid var(--line); border-radius:4px; overflow:hidden; margin:0 0 24px;}
+.legend > div{background:var(--surface); padding:13px 15px;}
+.legend .lt{margin-bottom:6px;}
+.legend p{font-size:13px; margin:0; color:var(--muted); line-height:1.45;
+  font-family:"IBM Plex Sans",sans-serif;}
+
+/* ---- layer stack diagram ---- */
+.stack{margin:0 0 24px; font-family:"IBM Plex Sans",sans-serif;}
+.layer{
+  border:1px solid var(--line); background:var(--surface); border-radius:4px;
+  padding:12px 16px; margin-bottom:5px; display:grid; grid-template-columns:118px minmax(0,1fr);
+  gap:16px; align-items:baseline;
+}
+.layer .lz{font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--muted);}
+.layer .lb{font-size:13.6px; color:var(--ink-2); min-width:0;}
+.layer .lb b{display:block; font-weight:600; color:var(--ink); font-size:14px; margin-bottom:2px;}
+.layer .lb code{font-size:11.5px; word-break:break-all;}
+.layer.sysapi{border-left:3px solid var(--accent);}
+.layer.vendor{border-left:3px solid var(--amber);}
+.layer.kern{border-left:3px solid var(--muted);}
+.rail{text-align:center; color:var(--muted); font-family:"IBM Plex Mono",monospace;
+  font-size:11px; margin:3px 0 4px; letter-spacing:.06em;}
+
+@media (max-width:760px){
+  .legend{grid-template-columns:1fr;}
+}
+@media (max-width:980px){
+  .wrap{grid-template-columns:1fr;}
+  .side{position:static; height:auto; border-right:none; border-bottom:1px solid var(--line);
+    padding:20px 16px;}
+  .side nav{max-height:none;}
+  main{padding:32px 16px 80px;}
+  h1{font-size:31px;}
+  h2{font-size:22px; margin-top:48px;}
+  body{font-size:15.5px;}
+}
+@media print{
+  .side{display:none;} .wrap{display:block;} main{padding:0;}
+  body{background:#fff; font-size:10.5pt;}
+  h2{page-break-after:avoid;} .tw,pre,.note{page-break-inside:avoid;}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important;}}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px;}
+</style>
+
+<div class="wrap">
+<aside class="side">
+  <div class="mark">SRS &middot; Rev C</div>
+  <h2>UHF Reader Platform<br>for RK3576 / Android 14</h2>
+  <nav>
+    <div class="grp">Context</div>
+    <a href="#s1"><span class="n">1</span><span>Introduction</span></a>
+    <a href="#s2"><span class="n">2</span><span>Overall description</span></a>
+    <a href="#s3"><span class="n">3</span><span>System architecture</span></a>
+    <div class="grp">Requirements</div>
+    <a href="#s4"><span class="n">4</span><span>Functional requirements</span></a>
+    <a href="#s41"><span class="n">4.1</span><span>Lifecycle &amp; connection</span></a>
+    <a href="#s42"><span class="n">4.2</span><span>Reader identity</span></a>
+    <a href="#s43"><span class="n">4.3</span><span>Serial link</span></a>
+    <a href="#s44"><span class="n">4.4</span><span>Region &amp; frequency</span></a>
+    <a href="#s45"><span class="n">4.5</span><span>RF power</span></a>
+    <a href="#s46"><span class="n">4.6</span><span>Antennas</span></a>
+    <a href="#s47"><span class="n">4.7</span><span>Polled inventory</span></a>
+    <a href="#s48"><span class="n">4.8</span><span>Streaming inventory</span></a>
+    <a href="#s49"><span class="n">4.9</span><span>Buffered inventory</span></a>
+    <a href="#s410"><span class="n">4.10</span><span>Tag memory access</span></a>
+    <a href="#s411"><span class="n">4.11</span><span>Tag security</span></a>
+    <a href="#s412"><span class="n">4.12</span><span>Read protection</span></a>
+    <a href="#s413"><span class="n">4.13</span><span>EAS</span></a>
+    <a href="#s414"><span class="n">4.14</span><span>Vendor extensions</span></a>
+    <a href="#s415"><span class="n">4.15</span><span>GPIO, relay, Wiegand</span></a>
+    <a href="#s416"><span class="n">4.16</span><span>Diagnostics &amp; raw</span></a>
+    <div class="grp">Interfaces</div>
+    <a href="#s5"><span class="n">5</span><span>External interfaces</span></a>
+    <a href="#s6"><span class="n">6</span><span>Non-functional</span></a>
+    <a href="#s7"><span class="n">7</span><span>Developer SDK</span></a>
+    <div class="grp">Delivery</div>
+    <a href="#s8"><span class="n">8</span><span>AOSP integration</span></a>
+    <a href="#s9"><span class="n">9</span><span>Verification &amp; test</span></a>
+    <a href="#s10"><span class="n">10</span><span>Risks &amp; phasing</span></a>
+    <a href="#s11"><span class="n">11</span><span>Open items</span></a>
+  </nav>
+</aside>
+
+<main>
+<div class="col">
+
+<h1>Software Requirements Specification</h1>
+<p class="lede">A platform-level UHF RFID subsystem for the RK3576 Android&nbsp;14 build: a vendor HAL that owns the reader, a system service that arbitrates it, a public <code>UhfManager</code> API, and a developer SDK that exposes every documented capability of the reader.</p>
+
+<div class="meta">
+  <span><b>Document</b> UHF-SRS-001 Rev&nbsp;C</span>
+  <span><b>Target</b> AOSP 14 (SDK 34, UP1A)</span>
+  <span><b>Board</b> rockchip/rk3576/rk3576_u</span>
+  <span><b>Reader</b> EPC C1G2 / ISO 18000-6C, fw v1.24</span>
+  <span><b>Status</b> Draft for review</span>
+</div>
+
+<div class="note">
+  <span class="t">Rev B changelog</span>
+  <p>Every file path in &sect;8 was checked against the actual tree at <code>~/aosp17/3576_14os</code> rather than assumed. Three were wrong: the API-signature path (&sect;8.1 #9), the per-product build file (&sect;8.1 #12), and the ueventd file (&sect;8.1 #14) &mdash; the last of which named a file that doesn&rsquo;t exist while the file that <em>does</em> apply is shared by every Rockchip board in the tree, not just this one. The HAL&rsquo;s AIDL package was also corrected: <code>hardware/interfaces/</code> is reserved for Google-defined core Treble interfaces, so a Rockchip-only HAL takes the <code>vendor.rockchip.hardware.uhf</code> namespace under <code>hardware/rockchip/</code>, matching this tree&rsquo;s existing HALs (<code>rvcam</code>, the audio HALs, <code>wifi_hal</code>). Two requirements were added for state interactions the reader&rsquo;s one-command-per-cycle constraint (NFR-C-01) implies but Rev&nbsp;A left unstated (FR-STR-13, FR-BUF-07), and one was added to close a regulatory-drift gap on HAL crash (FR-LC-09). Changed rows are marked &sect;<b>Rev B</b> inline.</p>
+</div>
+
+<div class="note">
+  <span class="t">Rev C changelog</span>
+  <p>Rev B's HAL namespace correction (<code>hardware/interfaces/</code> &rarr; <code>hardware/rockchip/</code>) was right about the directory; the specific package name it guessed, <code>vendor.rockchip.hardware.uhf</code>, was a reasonable inference from general Android vendor-HAL convention but not this tree's own. Phase 2 implementation work checked it against this tree's one existing custom Rockchip AIDL service, <code>hardware/rockchip/hwc_proxy_service/</code>, and found it uses the shorter <code>rockchip.&lt;name&gt;.aidl</code> shape instead (package <code>rockchip.hwc.proxy.aidl</code>, module <code>rockchip.hwc.proxy.aidl</code>). &sect;5.3 and &sect;8.1 row 10 now read <code>rockchip.uhf.aidl</code> throughout, matching what was actually built. The same research also surfaced a sepolicy requirement Rev A's original sketch had missed entirely — an NDK-backend AIDL service needs a <code>service_contexts</code> entry and a dedicated <code>protected_service</code> type, not just the HAL domain <code>.te</code> — folded into &sect;8.2's code block below.</p>
+</div>
+
+<h2 id="s1"><span class="sn">1</span>Introduction</h2>
+
+<h3><span class="sn">1.1</span>Purpose</h3>
+<p>This document specifies the software to be added to the RK3576 Android&nbsp;14 source tree so that UHF RFID reader hardware becomes a first-class platform capability. Today the reader is reachable only by an application that claims the USB device directly and re-implements the wire protocol. That approach cannot be shared between applications, cannot survive the app being backgrounded, and forces every integrator to rediscover the protocol's undocumented behaviours.</p>
+<p>The work specified here replaces that with a supported stack: one process owns the serial link, a system service arbitrates access and enforces permissions, and applications call a stable Java API. A distributable SDK lets third-party developers build against that API without access to the platform source.</p>
+
+<h3><span class="sn">1.2</span>Scope</h3>
+<p><strong>In scope.</strong> A vendor HAL process, a system server service, framework Manager and AIDL definitions, permission declarations, SELinux policy, device-tree and init integration, an SDK artifact with documentation and a reference application, and the test suite that gates all of it.</p>
+<p><strong>Out of scope.</strong> Reader firmware changes; the RFID tag commissioning workflow; any cloud or network sync of tag reads; industrial-design or enclosure work; support for the ISO 18000-6B protocol family, which this reader reports as unsupported.</p>
+
+<h3><span class="sn">1.3</span>Definitions</h3>
+<div class="tw"><table>
+<tr><th style="width:120px">Term</th><th>Meaning</th></tr>
+<tr><td class="mono">EPC C1G2</td><td>EPCglobal Class-1 Generation-2, the air protocol standardised as ISO/IEC 18000-6C. The only air protocol this reader supports.</td></tr>
+<tr><td class="mono">Inventory</td><td>One RF round in which the reader singulates and reports the tags in its field.</td></tr>
+<tr><td class="mono">Q value</td><td>Slot-count exponent for anti-collision; the round uses 2<sup>Q</sup> slots and should approximate the expected tag population.</td></tr>
+<tr><td class="mono">Session</td><td>EPC C1G2 inventory session S0–S3, governing how long a tag remembers it has been counted.</td></tr>
+<tr><td class="mono">Read</td><td>One sighting of one tag. A tag seen ten times yields ten reads and one unique EPC.</td></tr>
+<tr><td class="mono">Real-time mode</td><td>Reader working mode <code>0x76</code>, in which the reader pushes tag frames continuously instead of answering one inventory command at a time.</td></tr>
+<tr><td class="mono">Frame</td><td>One serial message: <code>Len | Adr | Cmd | Data[] | CRC16-LSB | CRC16-MSB</code>.</td></tr>
+<tr><td class="mono">Manager</td><td>The app-facing Java class <code>android.hardware.uhf.UhfManager</code>, obtained from <code>Context</code>.</td></tr>
+<tr><td class="mono">Service</td><td>The system_server component <code>com.android.server.uhf.UhfService</code>.</td></tr>
+<tr><td class="mono">HAL</td><td>The vendor process that owns the serial device and speaks the wire protocol.</td></tr>
+</table></div>
+
+<h3><span class="sn">1.4</span>References</h3>
+<div class="tw"><table>
+<tr><th style="width:74px">Ref</th><th>Document</th></tr>
+<tr><td class="mono">R1</td><td><em>UHF RFID Reader Series User Manual</em> v2.20 — vendor wire-protocol manual. Normative for all command codes and payload layouts.</td></tr>
+<tr><td class="mono">R2</td><td><code>PROTOCOL.md</code> — distilled protocol reference: framing, CRC16, status codes, band formulae, the antenna-check interlock.</td></tr>
+<tr><td class="mono">R3</td><td><code>COMMANDS.md</code> — byte-level captures of every exchange verified against hardware.</td></tr>
+<tr><td class="mono">R4</td><td><code>README.md</code> — measured throughput baselines and the two measurement traps that invalidate naive timings.</td></tr>
+<tr><td class="mono">R5</td><td>Reference implementation: <code>android/app/src/main/java/com/saurav/uhfreader/</code> — working USB-host app whose <code>UhfProtocol</code> and <code>UhfReader</code> classes are the starting point for the HAL.</td></tr>
+</table></div>
+
+<h3><span class="sn">1.5</span>Requirement conventions</h3>
+<p><strong>Shall</strong> marks a binding requirement; <strong>should</strong> marks a strong recommendation; <strong>may</strong> marks an option. Each requirement carries a stable identifier (<code>FR-ANT-03</code>), a priority, and — critically — a verification status describing how well the underlying wire command is known.</p>
+
+<div class="legend">
+  <div><span class="chip v lt">Verified</span><p>Exercised against the physical reader during protocol bring-up. Byte sequences are captured in R3.</p></div>
+  <div><span class="chip d lt">Documented</span><p>Specified in the vendor manual R1 and frame-encoded correctly, but not yet exchanged with hardware.</p></div>
+  <div><span class="chip u lt">Confirm</span><p>Command code inferred from the reader family's common command set. <strong>Must be confirmed against R1 before implementation.</strong></p></div>
+</div>
+
+<div class="note hard">
+  <span class="t">Read this before estimating</span>
+  <p>The vendor manual R1 was not available on disk when this specification was drafted. Every command code marked <span class="chip u">Confirm</span> is a strong inference from this reader family's shared command set, not a verified fact about this unit. The first task in Phase&nbsp;1 is a documentation pass that resolves each of those into Verified or Documented. Requirements are written so that the API surface does not change when a code is corrected — only the constant behind it does.</p>
+</div>
+
+<h2 id="s2"><span class="sn">2</span>Overall description</h2>
+
+<h3><span class="sn">2.1</span>Product perspective</h3>
+<p>The reader is a serial peripheral that presents itself over USB through an FTDI FT232R bridge, enumerating as <code>/dev/ttyUSB*</code> under the in-tree <code>ftdi_sio</code> driver. It is a strictly command–response device: it transmits nothing until asked, with one exception — once placed in real-time mode it streams continuously, and that mode persists across power cycles.</p>
+<p>The subsystem sits between that device and applications, and has four consumers: the OEM's own inventory application, third-party applications built against the SDK, platform diagnostics, and the factory test tooling that validates antennas at manufacture.</p>
+
+<h3><span class="sn">2.2</span>Product functions</h3>
+<p>Grouped by the section that specifies them:</p>
+<ul>
+<li><strong>Session management</strong> — discover the reader, open and release it, arbitrate between competing applications, survive hot-unplug (§4.1).</li>
+<li><strong>Reader configuration</strong> — identity, firmware, address, serial link, regulatory region, frequency plan, RF power, antenna mask, antenna-check interlock (§4.2–4.6).</li>
+<li><strong>Tag acquisition</strong> — polled inventory, continuous streaming, and buffered inventory, each with its own latency and throughput profile (§4.7–4.9).</li>
+<li><strong>Tag manipulation</strong> — read and write all four memory banks, rewrite EPC, block write and erase, kill, lock, access-password management (§4.10–4.11).</li>
+<li><strong>Tag protection</strong> — read protection with and without EPC, TID-based protection, EAS alarm set and detect (§4.12–4.13).</li>
+<li><strong>Peripheral control</strong> — GPIO, relay outputs, buzzer, Wiegand output for door controllers (§4.15).</li>
+<li><strong>Diagnostics</strong> — antenna return loss, raw frame passthrough for field support (§4.16).</li>
+</ul>
+
+<h3><span class="sn">2.3</span>Users</h3>
+<div class="tw"><table>
+<tr><th style="width:150px">Class</th><th>Needs</th><th>Access level</th></tr>
+<tr><td><b>App developer</b></td><td>Inventory tags, subscribe to a stream, read and write tag memory. Should never see a byte of the wire protocol.</td><td class="mono">UHF_READ, UHF_WRITE</td></tr>
+<tr><td><b>OEM integrator</b></td><td>Everything above, plus region, power, antenna and peripheral configuration at provisioning time.</td><td class="mono">+ UHF_CONFIGURE</td></tr>
+<tr><td><b>Platform engineer</b></td><td>Raw frame passthrough for bring-up and field diagnosis.</td><td class="mono">+ UHF_RAW</td></tr>
+<tr><td><b>Factory test</b></td><td>Return-loss sweep per antenna port, deterministic pass/fail.</td><td class="mono">+ UHF_RAW</td></tr>
+</table></div>
+
+<h3><span class="sn">2.4</span>Constraints established by measurement</h3>
+<p>These are not estimates. They were measured on this board with this reader and fourteen tags in the field, and they bound what the API can promise.</p>
+
+<div class="tw"><table>
+<tr><th>Configuration</th><th class="mono">Antennas</th><th class="mono">Reads/sec</th><th>Note</th></tr>
+<tr><td>Polled inventory <code>0x01</code></td><td class="mono">3</td><td class="mono">27.6</td><td>One command round trip per round</td></tr>
+<tr><td>Real-time stream <code>0x76</code></td><td class="mono">4</td><td class="mono">51.9</td><td>Antenna switching dominates</td></tr>
+<tr><td>Real-time stream</td><td class="mono">2</td><td class="mono">85.6</td><td></td></tr>
+<tr><td>Real-time stream</td><td class="mono">1</td><td class="mono">130.9</td><td><b>Best achievable at 115200 baud</b></td></tr>
+</table></div>
+
+<div class="note measured">
+  <span class="t">Measured — governs §6 performance requirements</span>
+  <p><strong>Antenna switching, not the UART and not the RF, dominates the read rate.</strong> Dropping from four enabled ports to one is worth 2.5×. All fourteen tags were readable on port&nbsp;1 alone, so the additional ports bought coverage rather than throughput. The API must therefore make the enabled-antenna set an explicit, per-session choice rather than a global default.</p>
+  <p><strong>Scan time <code>0x25</code> has no effect in real-time mode.</strong> 100&nbsp;ms and 300&nbsp;ms stream at an identical rate; only the polled path honours it. The API must not present it as a streaming tuning knob.</p>
+  <p><strong>A 900&nbsp;reads/sec target is unreachable at 115200&nbsp;baud.</strong> Tag frames measure ~18&nbsp;bytes, so the UART ceiling is 11520&nbsp;÷&nbsp;18&nbsp;≈&nbsp;640&nbsp;frames/sec before RF is even considered. Approaching 900 requires both a baud-rate increase (§4.3) and a far larger tag population — at fourteen tags the reader is bound by per-round overhead, not by tag count.</p>
+</div>
+
+<h3><span class="sn">2.5</span>Assumptions and dependencies</h3>
+<ul>
+<li>The reader remains an FTDI-bridged serial device. If a future unit exposes a native USB CDC or a direct UART connection, only the HAL's transport layer changes — §4 and §5 are transport-agnostic by design.</li>
+<li><code>ftdi_sio</code> is built into the RK3576 kernel and binds the device automatically.</li>
+<li>The build is <code>userdebug</code> during development. Requirements that depend on <code>adb root</code> are development aids only and are called out where they appear.</li>
+<li>Antenna port&nbsp;3 on the current unit is faulty and must be excluded from any default mask (see R4).</li>
+</ul>
+
+<h2 id="s3"><span class="sn">3</span>System architecture</h2>
+
+<h3><span class="sn">3.1</span>Layer model</h3>
+<p>Four layers, each with one responsibility and a single downward dependency.</p>
+
+<div class="stack">
+  <div class="layer">
+    <span class="lz">Application</span>
+    <span class="lb"><b>App / SDK client</b>Third-party or OEM app holding a <code>UhfManager</code>. Never touches USB, never sees a frame.</span>
+  </div>
+  <div class="rail">↕ &nbsp;Binder &mdash; batched, oneway for tag delivery</div>
+  <div class="layer sysapi">
+    <span class="lz">Framework</span>
+    <span class="lb"><b>UhfManager</b><code>frameworks/base/core/java/android/hardware/uhf/</code> — thin client wrapper, parameter validation, callback marshalling onto the caller's Executor.</span>
+  </div>
+  <div class="rail">↕ &nbsp;IUhfService.aidl</div>
+  <div class="layer sysapi">
+    <span class="lz">system_server</span>
+    <span class="lb"><b>UhfService</b><code>frameworks/base/services/core/java/com/android/server/uhf/</code> — permission enforcement, session arbitration, client death recovery, state machine, boot-time mode reset.</span>
+  </div>
+  <div class="rail">↕ &nbsp;rockchip.uhf.aidl.IUhfReader (vendor AIDL HAL)</div>
+  <div class="layer vendor">
+    <span class="lz">Vendor HAL</span>
+    <span class="lb"><b>uhf-hal-service</b><code>hardware/rockchip/uhf/aidl/ + default impl</code> — owns <code>/dev/ttyUSB*</code>, frames and de-frames, CRC16, retry and resync, hot-plug via uevent, the streaming pump thread.</span>
+  </div>
+  <div class="rail">↕ &nbsp;termios / read / write</div>
+  <div class="layer kern">
+    <span class="lz">Kernel</span>
+    <span class="lb"><b>ftdi_sio</b><code>/dev/ttyUSB*</code> — FTDI FT232R USB-serial bridge, 115200 8N1.</span>
+  </div>
+</div>
+
+<h3><span class="sn">3.2</span>Why the HAL is a separate process</h3>
+<p>The serial device is vendor hardware. Putting the protocol implementation in <code>system_server</code> would mean a system-partition process holding a vendor device node open, which violates Treble layering and makes the device node's SELinux label awkward to express. It would also mean a protocol bug — a runaway resync loop, a blocking read without a timeout — could take down <code>system_server</code> and with it the device.</p>
+<p>A separate vendor process isolates that risk: if the HAL dies, <code>init</code> restarts it, <code>UhfService</code> observes the binder death, and clients receive a state callback. Nothing else on the device is affected.</p>
+
+<div class="note">
+  <span class="t">Phased alternative</span>
+  <p>For Phase&nbsp;1 bring-up only, <code>UhfService</code> may talk to the tty directly through JNI, skipping the HAL. This shortens the first integration considerably and lets the API surface be validated early. It is explicitly a temporary arrangement: <span class="chip p1">BLD-09</span> requires the HAL split before the subsystem ships.</p>
+</div>
+
+<h3><span class="sn">3.3</span>The streaming data path</h3>
+<p>This is the performance-critical path and the one most easily got wrong. At 130&nbsp;reads/sec — and far more if the baud rate rises — a design that crosses a process boundary once per tag will spend more time in IPC than in RF.</p>
+<pre><code>reader ──serial──▶ HAL pump thread
+                     │  parse frames, drop CRC failures, resync
+                     │  accumulate into a batch buffer
+                     ▼
+                   batch flush  ── every 50 ms OR 64 tags, whichever first
+                     │
+                     ▼  oneway Binder, one call per batch
+                   UhfService dispatch thread
+                     │  fan out to registered sessions
+                     ▼  oneway Binder, one call per batch per client
+                   UhfManager
+                     │  marshal onto the client's Executor
+                     ▼
+                   app: onTagsRead(List&lt;TagRead&gt;)</code></pre>
+<p>The batch window is the single tuning parameter. At 50&nbsp;ms it yields 20&nbsp;Binder transactions per second regardless of read rate, while adding at most 50&nbsp;ms of latency to a tag sighting.</p>
+
+<div class="note measured">
+  <span class="t">Measured — a mistake worth not repeating</span>
+  <p>The reference application originally posted a UI refresh per tag read. At 130&nbsp;reads/sec this saturated the main thread and froze the display entirely, while the reader itself was keeping up perfectly. The same failure mode is available one layer down: a per-tag Binder call. Batching is a requirement, not an optimisation.</p>
+</div>
+
+<h3><span class="sn">3.4</span>Process and security model</h3>
+<div class="tw"><table>
+<tr><th style="width:150px">Component</th><th>Process</th><th class="mono">Domain</th><th>Owns</th></tr>
+<tr><td>App / SDK client</td><td>app process</td><td class="mono">untrusted_app</td><td>Binder handle only</td></tr>
+<tr><td>UhfManager</td><td>app process</td><td class="mono">untrusted_app</td><td>Client-side state</td></tr>
+<tr><td>UhfService</td><td>system_server</td><td class="mono">system_server</td><td>Sessions, permissions, arbitration</td></tr>
+<tr><td>uhf-hal-service</td><td>vendor native</td><td class="mono">hal_uhf_default</td><td><code>/dev/ttyUSB*</code>, protocol state</td></tr>
+</table></div>
+<p>The device node is relabelled <code>uhf_device</code> and made readable and writable only by the HAL domain. No app, and not <code>system_server</code>, may open it.</p>
+
+<h2 id="s4"><span class="sn">4</span>Functional requirements</h2>
+<p>Each subsection states the requirements, then the Java API that satisfies them. Priorities: <span class="chip p1">P1</span> ships in the first release, <span class="chip p2">P2</span> ships before general availability, <span class="chip p3">P3</span> is desirable.</p>
+
+<h3 id="s41"><span class="sn">4.1</span>Lifecycle and connection</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-LC-01</td><td>The service shall report whether reader hardware is present, distinguishing "no hardware" from "hardware present but unavailable".</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LC-02</td><td>The service shall enumerate attached readers and expose a stable identifier for each, so a multi-reader device can address them individually.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-LC-03</td><td>A client shall acquire an exclusive session before issuing any reader command. Sessions are exclusive because the reader accepts one command per cycle and interleaving two clients corrupts both.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LC-04</td><td>The service shall release a session automatically when the owning client's process dies, and shall return the reader to answering mode as part of that release.</td><td class="mono">0x76</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LC-05</td><td>On boot, and before granting the first session, the service shall force the reader out of real-time mode and drain the port.</td><td class="mono">0x76</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LC-06</td><td>The service shall detect hot-attach and hot-detach of the USB device and deliver a state callback within 2&nbsp;s of the kernel uevent.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LC-07</td><td>On detach during an active stream, the service shall terminate the stream with a distinct error rather than silently stopping delivery.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LC-08</td><td>The service shall restore the previous session's configuration — antenna mask, power, region — after a HAL restart, so a crash is not silently a reconfiguration.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-LC-09</td><td><b>(Rev B)</b> Independent of FR-LC-08, the service shall persist the last successfully applied regulatory region in platform settings (not merely read it back from the reader) and shall re-apply it before granting the first session after <em>any</em> service or HAL restart, including one FR-LC-08 has not yet been implemented to cover.</td><td class="mono">0x22</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Why FR-LC-09 is P1 while FR-LC-08 is P2</span>
+  <p>FR-LC-08 bundles antenna mask, power and region together as one general "restore prior config" feature, deferrable to P2. But region is not like the other two: an antenna mask or power level reverting to default after a crash is a throughput regression; a <em>region</em> reverting to default is the reader transmitting on the wrong regulatory band, and FR-FRQ-04 only logs a region change when a caller makes one deliberately — a crash-triggered reset generates no log entry at all. Shipping FR-LC-08 at P2 without FR-LC-09 would mean a HAL crash can silently move the device out of its licensed band, undetected, for as long as it takes P2 to land. Region gets its own, higher-priority, non-reader-dependent persistence path instead of waiting on the general mechanism.</p>
+</div>
+
+<div class="note hard">
+  <span class="t">Why FR-LC-05 exists</span>
+  <p>Real-time mode is stored in the reader's non-volatile configuration and <strong>survives a power cycle</strong> (R1 §8.4.23). A device that was streaming when it was switched off is still streaming when it comes back. Without an unconditional reset at boot, the first client to open the port meets a flood of unsolicited tag frames, and every command reply it sends arrives interleaved with them. During bring-up this presented as a reader that "answered garbage" and cost significant time to diagnose.</p>
+</div>
+
+<pre><code><span class="cm">// android.hardware.uhf.UhfManager</span>
+
+<span class="kw">public static final</span> String ACTION_READER_STATE_CHANGED
+        = <span class="kw">"android.hardware.uhf.action.READER_STATE_CHANGED"</span>;
+
+<span class="kw">public</span> boolean         isReaderAvailable();
+<span class="kw">public</span> List&lt;UhfDeviceInfo&gt; getReaders();
+<span class="kw">public</span> UhfSession      openSession(String readerId) <span class="kw">throws</span> UhfException;
+<span class="kw">public</span> UhfSession      openSession() <span class="kw">throws</span> UhfException;   <span class="cm">// default reader</span>
+<span class="kw">public void</span>            registerStateCallback(Executor e, StateCallback cb);
+<span class="kw">public void</span>            unregisterStateCallback(StateCallback cb);
+
+<span class="cm">// UhfSession — AutoCloseable; close() releases the reader and resets mode</span>
+<span class="kw">public void</span>            close();
+<span class="kw">public</span> boolean         isValid();
+
+<span class="cm">// States delivered to StateCallback.onStateChanged(int)</span>
+STATE_ABSENT, STATE_ATTACHED, STATE_READY, STATE_BUSY, STATE_ERROR</code></pre>
+
+<h3 id="s42"><span class="sn">4.2</span>Reader identity and information</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-INF-01</td><td>The API shall report firmware version, model type, supported air protocols, regulatory band, frequency range in MHz, maximum RF power, configured scan time, enabled antenna mask, and antenna-check state.</td><td class="mono">0x21</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INF-02</td><td>The HAL shall decode <code>Version</code> as a two-byte field. Every subsequent field's offset depends on this.</td><td class="mono">0x21</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INF-03</td><td>The API shall derive the band code as <code>(dmaxfre &gt;&gt; 6) &lt;&lt; 2 | (dminfre &gt;&gt; 6)</code> and resolve it to a named region with its frequency formula.</td><td class="mono">0x21</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INF-04</td><td>The API shall expose reader address get and set, retaining <code>0xFF</code> as broadcast.</td><td class="mono">0x24</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-INF-05</td><td>The API shall cache reader information for the life of a session and invalidate it on any configuration write, so an app reading it in a loop does not generate serial traffic.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Why FR-INF-02 is called out separately</span>
+  <p>Treating <code>Version</code> as one byte shifts every later field by one position. The result still parses, still passes CRC, and yields a plausible-looking band, power and antenna mask — all wrong. This bug was hit during bring-up and produced a confidently incorrect regulatory band. A unit test with the captured 18-byte response from R3 is mandatory.</p>
+</div>
+
+<pre><code><span class="cm">// UhfReaderInfo — Parcelable</span>
+<span class="kw">public</span> String  getFirmwareVersion();    <span class="cm">// "1.24"</span>
+<span class="kw">public int</span>     getModelType();
+<span class="kw">public</span> boolean supportsIso18000_6C();
+<span class="kw">public</span> boolean supportsIso18000_6B();
+<span class="kw">public int</span>     getBandCode();           <span class="cm">// 0b0100 = EU</span>
+<span class="kw">public</span> String  getBandName();           <span class="cm">// "EU"</span>
+<span class="kw">public double</span>  getMinFrequencyMhz();    <span class="cm">// 865.1</span>
+<span class="kw">public double</span>  getMaxFrequencyMhz();    <span class="cm">// 867.9</span>
+<span class="kw">public int</span>     getMaxRfPower();         <span class="cm">// 30</span>
+<span class="kw">public int</span>     getScanTimeMs();
+<span class="kw">public int</span>     getAntennaMask();
+<span class="kw">public</span> boolean isAntennaCheckEnabled();</code></pre>
+
+<h3 id="s43"><span class="sn">4.3</span>Serial link and communication interface</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-LNK-01</td><td>The HAL shall open the port at 115200 8N1 and shall auto-detect the rate by probing <code>0x21</code> across the supported set if identification fails.</td><td class="mono">0x21</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LNK-02</td><td>The API shall expose baud-rate change. The HAL shall send the reply at the old rate, then reopen at the new rate, and shall roll back if identification fails afterwards.</td><td class="mono">0x28</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-LNK-03</td><td>The HAL shall validate every received frame by running CRC16 over the whole frame including its CRC bytes and requiring a result of zero.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LNK-04</td><td>On a CRC failure the HAL shall resync by discarding one byte and re-scanning, and shall discard any leading byte whose value is below 4 since it cannot be a valid length.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LNK-05</td><td>The HAL shall keep the inter-byte gap of transmitted frames below 15&nbsp;ms; exceeding it causes the reader to discard the partial frame and resync.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LNK-06</td><td>When matching a command reply the HAL shall require <code>reCmd</code> to equal the command sent, not merely a valid CRC.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-LNK-07</td><td>The API shall expose the USB/UART interface selector, and shall warn that the setting is mutually exclusive and takes effect only after a power cycle.</td><td class="mono">0x6A</td><td><span class="chip d">Documented</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-LNK-08</td><td>The HAL shall purge stale receive data before every command transaction.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Why FR-LNK-06 is load-bearing</span>
+  <p>In real-time mode the reader floods the port with <code>0xEE</code> tag frames. Those frames have valid CRCs and a success status, so a receiver that accepts "the first structurally valid frame" as a command reply will accept a tag report instead. Every subsequent configuration step then silently applies to nothing. Matching <code>reCmd</code> is the only reliable discriminator.</p>
+</div>
+
+<div class="note">
+  <span class="t">Dependency for the throughput goal</span>
+  <p>FR-LNK-02 is the gate on any read rate above ~640&nbsp;frames/sec. Whether this reader accepts 230400 or 460800 is <strong>not yet established</strong> — R2 documents values only up to 115200 (<code>0x06</code>). Resolving this is tracked as <a href="#s11">OI-03</a>.</p>
+</div>
+
+<pre><code><span class="kw">public void</span>  setBaudRate(<span class="kw">int</span> baud) <span class="kw">throws</span> UhfException;
+<span class="kw">public int</span>   getBaudRate();
+<span class="kw">public void</span>  setCommInterface(<span class="kw">int</span> iface);  <span class="cm">// IFACE_USB | IFACE_UART</span>
+<span class="kw">public int</span>   getCommInterface();</code></pre>
+
+<h3 id="s44"><span class="sn">4.4</span>Region and frequency plan</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-FRQ-01</td><td>The API shall expose the regulatory region as a named constant and shall reject any region the reader's band code does not support.</td><td class="mono">0x22</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-FRQ-02</td><td>The API shall expose the minimum and maximum frequency points and shall convert them to MHz using the band's formula.</td><td class="mono">0x22</td><td><span class="chip v">Verified</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-FRQ-03</td><td>The API shall expose the computed frequency plan — the ordered list of channel centres in MHz that the reader will hop across.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-FRQ-04</td><td>Region change shall require <code>UHF_CONFIGURE</code> and shall be logged to the event log, since an incorrect region is a regulatory violation.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-FRQ-05</td><td>The API shall support a single-frequency mode where min and max points are equal, for conducted testing.</td><td class="mono">0x22</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+</table></div>
+<p>Band formulae, from R2. The unit under test reports band code <code>0100</code>, giving 865.1–867.9&nbsp;MHz.</p>
+<div class="tw"><table>
+<tr><th>Region</th><th class="mono">Code</th><th>Centre frequency</th><th class="mono">N range</th></tr>
+<tr><td>Chinese band 2</td><td class="mono">0001</td><td class="mono">920.125 + N × 0.25 MHz</td><td class="mono">0–19</td></tr>
+<tr><td>US</td><td class="mono">0010</td><td class="mono">902.75 + N × 0.5 MHz</td><td class="mono">0–49</td></tr>
+<tr><td>Korea</td><td class="mono">0011</td><td class="mono">917.1 + N × 0.2 MHz</td><td class="mono">0–31</td></tr>
+<tr><td><b>EU</b></td><td class="mono">0100</td><td class="mono">865.1 + N × 0.2 MHz</td><td class="mono">0–14</td></tr>
+<tr><td>Ukraine</td><td class="mono">0110</td><td class="mono">868.0 + N × 0.1 MHz</td><td class="mono">0–6</td></tr>
+<tr><td>Peru</td><td class="mono">0111</td><td class="mono">916.2 + N × 0.9 MHz</td><td class="mono">0–11</td></tr>
+<tr><td>Chinese band 1</td><td class="mono">1000</td><td class="mono">840.125 + N × 0.25 MHz</td><td class="mono">0–19</td></tr>
+<tr><td>EU3</td><td class="mono">1001</td><td class="mono">865.7 + N × 0.6 MHz</td><td class="mono">0–3</td></tr>
+<tr><td>Taiwan</td><td class="mono">1010</td><td class="mono">922.25 + N × 0.5 MHz</td><td class="mono">0–11</td></tr>
+<tr><td>US band 3</td><td class="mono">1100</td><td class="mono">902 + N × 0.5 MHz</td><td class="mono">0–52</td></tr>
+</table></div>
+
+<h3 id="s45"><span class="sn">4.5</span>RF power</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-PWR-01</td><td>The API shall set RF power on the scale 0–30 reported by the reader, where 30 corresponds to approximately 1&nbsp;W.</td><td class="mono">0x2F</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-PWR-02</td><td>The API shall reject values above the <code>Power</code> maximum reported by <code>0x21</code> rather than passing them to the reader.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-PWR-03</td><td>The service shall apply a configurable safe ceiling, defaulting to 20, and shall require an explicit override flag to exceed it.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-PWR-04</td><td>Where the reader supports per-antenna power, the API shall expose it; where it does not, the per-antenna call shall apply the value globally and report that it did so.</td><td class="mono">0x2F</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Measured — the reason FR-PWR-03 exists</span>
+  <p>At power 30/30 this reader browns out on the current supply. Every command continues to answer normally — identity, antenna mask, region — but <strong>inventory returns nothing at all</strong>. The failure presents as "the reader works but sees no tags", which sends diagnosis toward antennas and tag placement rather than toward power. Operation at 20/30 or below is stable. The ceiling must be enforced in software, and exceeding it must be a deliberate act.</p>
+</div>
+
+<pre><code><span class="kw">public void</span>  setRfPower(<span class="kw">int</span> power) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>  setRfPower(<span class="kw">int</span> power, <span class="kw">boolean</span> allowAboveSafeCeiling);
+<span class="kw">public int</span>   getRfPower();
+<span class="kw">public int</span>   getMaxRfPower();
+<span class="kw">public int</span>   getSafeRfPowerCeiling();      <span class="cm">// default 20</span></code></pre>
+
+<h3 id="s46"><span class="sn">4.6</span>Antenna management and diagnostics</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-ANT-01</td><td>The API shall get and set the enabled-antenna bitmask, bit&nbsp;0 being port&nbsp;1 through bit&nbsp;3 being port&nbsp;4.</td><td class="mono">0x3F</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-ANT-02</td><td>When antenna check is enabled, the HAL shall disable it, write the mask, and re-enable it — in that order — because <code>0x3F</code> is rejected with status <code>0xF9</code> while the check is on.</td><td class="mono">0x3F&nbsp;0x66</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-ANT-03</td><td>The API shall get and set the antenna connection check.</td><td class="mono">0x66</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-ANT-04</td><td>On inventory status <code>0xF8</code> the API shall raise a distinct antenna-fault error naming the mask in use, not a generic failure.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-ANT-05</td><td>The API shall measure antenna return loss at a caller-specified frequency, accepting frequency in kHz and rejecting values that are not a multiple of 100 or 125&nbsp;kHz.</td><td class="mono">0x91</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-ANT-06</td><td>The API shall provide a sweep helper returning return loss for every enabled port across the region's frequency plan, for factory test.</td><td class="mono">0x91</td><td><span class="chip d">Documented</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-ANT-07</td><td>The mask written at session open shall default to the ports the integrator provisioned, never to "all four".</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-ANT-08</td><td>The API documentation shall state the measured throughput cost of each additional enabled port.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Two hardware behaviours the vendor manual does not mention</span>
+  <p><strong>The interlock.</strong> Command <code>0x3F</code> is rejected with status <code>0xF9</code> whenever antenna check <code>0x66</code> is enabled. The working order is: check off, write mask, check on. Without this the mask write appears to fail for no reason.</p>
+  <p><strong>The abort.</strong> With antenna check enabled and a faulty port included in the mask, inventory returns <code>0xF8</code> for the whole command and yields <em>no tags at all</em> — the reader aborts rather than skipping the bad port. Since port&nbsp;3 on the current unit is faulty, any default mask that includes it produces a reader that appears completely dead.</p>
+</div>
+
+<pre><code><span class="kw">public void</span>  setEnabledAntennas(<span class="kw">int</span> mask) <span class="kw">throws</span> UhfException;
+<span class="kw">public int</span>   getEnabledAntennas();
+<span class="kw">public void</span>  setAntennaCheckEnabled(<span class="kw">boolean</span> enabled);
+<span class="kw">public</span> boolean isAntennaCheckEnabled();
+<span class="kw">public double</span> measureReturnLoss(<span class="kw">int</span> antenna, <span class="kw">int</span> frequencyKhz) <span class="kw">throws</span> UhfException;
+<span class="kw">public</span> List&lt;AntennaMeasurement&gt; sweepReturnLoss(<span class="kw">int</span> antennaMask);
+
+<span class="cm">// Mask constants</span>
+ANTENNA_1 = 0x01, ANTENNA_2 = 0x02, ANTENNA_3 = 0x04, ANTENNA_4 = 0x08</code></pre>
+
+<h3 id="s47"><span class="sn">4.7</span>Polled inventory</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-INV-01</td><td>The API shall perform one inventory round and return every tag reported, with EPC, RSSI and the antenna port that saw it.</td><td class="mono">0x01</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INV-02</td><td>The HAL shall continue reading while the response status is <code>0x03</code> and shall concatenate all frames before returning.</td><td class="mono">0x01</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INV-03</td><td>The HAL shall terminate the read on any status other than <code>0x03</code> rather than waiting out a fixed idle timer.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INV-04</td><td>The API shall accept Q value and session as parameters, defaulting to Q=4 and S0.</td><td class="mono">0x01</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INV-05</td><td>The API shall accept optional target, antenna and scan time. The HAL shall send all three or none, since the reader rejects a partial set.</td><td class="mono">0x01</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-INV-06</td><td>The API shall expose single-tag inventory for point-and-read use.</td><td class="mono">0x0F</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-INV-07</td><td>The API shall get and set inventory scan time in milliseconds, converting to and from the reader's 100&nbsp;ms units.</td><td class="mono">0x25</td><td><span class="chip v">Verified</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-INV-08</td><td>Status <code>0xFB</code> shall return an empty list, not an error — no tags in field is a normal outcome.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-INV-09</td><td>Status <code>0x02</code> and <code>0x04</code> shall return the partial results together with a flag marking them partial.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-INV-10</td><td>The parser shall honour the EPC block length field's bit&nbsp;7 (EPC+TID present) and bit&nbsp;6 (phase and frequency data follow), masking the length to bits 5–0.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Why FR-INV-02 is a requirement and not an implementation detail</span>
+  <p>Status <code>0x03</code> means the reader could not fit all results into one frame and more are coming. A reader that stops at the first frame silently truncates the tag list — during bring-up this was the difference between reporting one tag and reporting seven, with no error anywhere to indicate loss.</p>
+</div>
+
+<pre><code><span class="kw">public</span> List&lt;UhfTag&gt; inventory() <span class="kw">throws</span> UhfException;
+<span class="kw">public</span> List&lt;UhfTag&gt; inventory(InventoryParams params) <span class="kw">throws</span> UhfException;
+<span class="kw">public</span> UhfTag       inventorySingle() <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>       setScanTimeMs(<span class="kw">int</span> ms);
+<span class="kw">public int</span>        getScanTimeMs();
+
+<span class="cm">// InventoryParams.Builder</span>
+  .setQValue(<span class="kw">int</span> q)              <span class="cm">// 0–15, default 4</span>
+  .setSession(<span class="kw">int</span> s)             <span class="cm">// SESSION_S0..S3, default S0</span>
+  .setTarget(<span class="kw">int</span> t)              <span class="cm">// TARGET_A | TARGET_B</span>
+  .setAntenna(<span class="kw">int</span> port)          <span class="cm">// 1–4; sent with target+scanTime or not at all</span>
+  .setScanTimeMs(<span class="kw">int</span> ms)
+  .build();
+
+<span class="cm">// UhfTag — Parcelable</span>
+<span class="kw">public</span> byte[]  getEpc();
+<span class="kw">public</span> String  getEpcHex();
+<span class="kw">public</span> byte[]  getTid();          <span class="cm">// non-null when FastID was requested</span>
+<span class="kw">public int</span>     getRssi();
+<span class="kw">public int</span>     getAntenna();      <span class="cm">// resolved port number, 1–4</span>
+<span class="kw">public long</span>    getTimestampNanos();
+<span class="kw">public int</span>     getReadCount();    <span class="cm">// within the delivering batch</span></code></pre>
+
+<h3 id="s48"><span class="sn">4.8</span>Real-time streaming inventory</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-STR-01</td><td>The API shall start and stop continuous streaming, delivering tag reads asynchronously to a registered callback.</td><td class="mono">0x76</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-02</td><td>Tag reads shall be delivered in batches, never one Binder transaction per read.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-03</td><td>The batch shall flush on whichever comes first: a configurable time window defaulting to 50&nbsp;ms, or a configurable batch size defaulting to 64 reads.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-04</td><td>The API shall configure read-pause time, duplicate-filter time, Q value and session before entering streaming mode.</td><td class="mono">0x75</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-05</td><td>Duplicate filtering shall default to disabled, so every sighting is reported. Enabling it is an explicit caller choice.</td><td class="mono">0x75</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-06</td><td>The API shall report the current working mode.</td><td class="mono">0x77</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-STR-07</td><td>Stopping shall be retried and verified: the HAL shall send the stop frame up to three times and confirm the port has gone quiet before declaring the reader idle.</td><td class="mono">0x76</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-08</td><td>The HAL shall not send configuration commands while streaming is active; the service shall stop the stream, apply, and restart.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-09</td><td>The API shall expose a de-duplicating variant that reports only the first sighting of each EPC within a session, implemented in the framework rather than by the reader's filter.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-STR-10</td><td>Stream statistics — unique tags, total reads, reads per second, dropped batches — shall be queryable, and the rate shall be computed from the first tag delivered, not from the start call.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-STR-11</td><td>If a client's callback cannot keep up, the service shall drop whole batches for that client, count them, and continue — never block the HAL pump.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-STR-12</td><td>The API shall not present scan time as a streaming tuning parameter.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-STR-13</td><td><b>(Rev B)</b> The service shall apply the same stop-apply-restart discipline as FR-STR-08 to any call that is not itself a streaming call: buffered inventory (§4.9), tag memory access and security operations (§4.10–4.13), and diagnostics (§4.16). The stream shall be stopped before the operation, and restarted with its prior parameters afterward if the caller had not explicitly called <code>stopStreaming()</code>.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<div class="note hard">
+  <span class="t">Why FR-STR-13 exists</span>
+  <p>NFR-C-01 already establishes that the reader accepts one command per cycle and the HAL serialises all transactions on a single thread. Rev&nbsp;A stated the consequence for configuration writes (FR-STR-08) but not for the other command families that share the same constraint — a caller starting a buffered inventory or a tag write while a stream is running would either corrupt both exchanges or hang behind the pump thread with no documented behaviour either way. Rather than three near-duplicate requirements in §4.9–4.13, this generalises FR-STR-08's rule to any non-streaming call and those sections reference it instead of restating it (see FR-BUF-07).</p>
+</div>
+
+<div class="note measured">
+  <span class="t">Measured — the basis for FR-STR-10</span>
+  <p>Entering real-time mode costs five to ten seconds of command round trips before the first tag arrives. A rate computed from the start call divides by that dead time and understates the true rate by roughly half — a reference implementation reported 24&nbsp;reads/sec on a link that was actually delivering 50. Timing must begin at the first delivered read.</p>
+  <p>A second trap: counters that accumulate across runs. Clearing must reset the time base as well as the totals, or successive measurements drift upward.</p>
+</div>
+
+<pre><code><span class="kw">public void</span>  setStreamParams(StreamParams params) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>  startStreaming(Executor executor, TagCallback callback) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>  stopStreaming();
+<span class="kw">public</span> boolean isStreaming();
+<span class="kw">public</span> StreamStats getStreamStats();
+<span class="kw">public void</span>  resetStreamStats();
+
+<span class="cm">// StreamParams.Builder</span>
+  .setReadPauseMs(<span class="kw">int</span> ms)         <span class="cm">// default 0 (minimum inter-round gap)</span>
+  .setFilterTimeMs(<span class="kw">int</span> ms)        <span class="cm">// default 0 = report every sighting</span>
+  .setQValue(<span class="kw">int</span> q)              <span class="cm">// default 4</span>
+  .setSession(<span class="kw">int</span> s)             <span class="cm">// default SESSION_S0</span>
+  .setBatchWindowMs(<span class="kw">int</span> ms)       <span class="cm">// default 50</span>
+  .setMaxBatchSize(<span class="kw">int</span> n)         <span class="cm">// default 64</span>
+  .setUniqueOnly(<span class="kw">boolean</span> b)      <span class="cm">// default false</span>
+  .build();
+
+<span class="cm">// TagCallback</span>
+<span class="kw">void</span> onTagsRead(List&lt;UhfTag&gt; batch);
+<span class="kw">void</span> onStreamError(<span class="kw">int</span> errorCode, String message);
+<span class="kw">void</span> onBatchesDropped(<span class="kw">int</span> count);</code></pre>
+
+<h3 id="s49"><span class="sn">4.9</span>Buffered inventory</h3>
+<p>The reader can accumulate tag reads into its own memory and hand them over on request. This decouples RF timing from host timing entirely and is the only approach with a credible path toward very high aggregate rates, because it removes the per-round serial round trip.</p>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-BUF-01</td><td>The API shall start a buffered inventory that accumulates reads in reader memory.</td><td class="mono">0x18</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-BUF-02</td><td>The API shall query the number of tags currently held in the reader's buffer.</td><td class="mono">0x19</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-BUF-03</td><td>The API shall read the buffer contents, handling multi-frame responses as in FR-INV-02.</td><td class="mono">0x72</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-BUF-04</td><td>The API shall clear the buffer, and shall clear it automatically when a buffered session ends.</td><td class="mono">0x1A</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-BUF-05</td><td>On status <code>0x04</code>, buffer full, the API shall deliver what was captured and raise a distinct overflow signal.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-BUF-06</td><td>The service shall offer an auto-drain mode that polls the buffer on an interval and delivers reads through the same batched callback as streaming.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-BUF-07</td><td><b>(Rev B)</b> <code>startBufferedInventory()</code> is one of the calls governed by FR-STR-13: if a stream is active it shall be stopped first and, if the caller had not stopped it explicitly, restarted when the buffered session ends. The reader shall never be asked to run streaming and buffered inventory concurrently.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<pre><code><span class="kw">public void</span>  startBufferedInventory(InventoryParams params) <span class="kw">throws</span> UhfException;
+<span class="kw">public int</span>   getBufferedTagCount() <span class="kw">throws</span> UhfException;
+<span class="kw">public</span> List&lt;UhfTag&gt; readBuffer() <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>  clearBuffer() <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>  startBufferedAutoDrain(<span class="kw">int</span> intervalMs, Executor e, TagCallback cb);</code></pre>
+
+<h3 id="s410"><span class="sn">4.10</span>Tag memory access</h3>
+<p>EPC C1G2 tags expose four memory banks. Every operation below targets a single tag, selected by an EPC match, and may require an access password. All are governed by FR-STR-13: if a stream is active, the service stops it, performs the operation, and restarts it.</p>
+<div class="tw"><table>
+<tr><th class="mono" style="width:60px">Bank</th><th style="width:110px">Name</th><th>Contents</th></tr>
+<tr><td class="mono">0</td><td>Reserved</td><td>Kill password (words 0–1), access password (words 2–3)</td></tr>
+<tr><td class="mono">1</td><td>EPC</td><td>CRC-16, Protocol Control, then the EPC itself</td></tr>
+<tr><td class="mono">2</td><td>TID</td><td>Tag identification — manufacturer and model, normally read-only</td></tr>
+<tr><td class="mono">3</td><td>User</td><td>Optional user memory, size varies by tag model</td></tr>
+</table></div>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-MEM-01</td><td>The API shall read a word range from any bank of a tag selected by EPC, with an optional access password.</td><td class="mono">0x02</td><td><span class="chip u">Confirm</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-MEM-02</td><td>The API shall write a word range to any writable bank of a tag selected by EPC.</td><td class="mono">0x03</td><td><span class="chip u">Confirm</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-MEM-03</td><td>The API shall rewrite a tag's EPC, updating the Protocol Control word's length field to match.</td><td class="mono">0x04</td><td><span class="chip u">Confirm</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-MEM-04</td><td>The API shall expose block write for tags that support it, falling back to sequential word writes when the tag does not.</td><td class="mono">0x10</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-MEM-05</td><td>The API shall expose block erase.</td><td class="mono">0x07</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-MEM-06</td><td>Word addresses and counts shall be validated against the bank's size before transmission, and out-of-range access shall fail locally.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-MEM-07</td><td>All write operations shall be read-back verified by default, with verification suppressible for bulk commissioning.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-MEM-08</td><td>A write that fails partway shall report how many words were committed, since the tag is then in a partially written state.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-MEM-09</td><td>The API shall expose extended read and write for tags whose user memory exceeds the standard addressing range.</td><td class="mono">0x1B&nbsp;0x1C</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+</table></div>
+
+<pre><code><span class="cm">// TagFilter selects which tag an operation targets</span>
+TagFilter.byEpc(byte[] epc)
+TagFilter.byEpc(byte[] epc, byte[] accessPassword)
+TagFilter.byTid(byte[] tid)
+TagFilter.any()                      <span class="cm">// only valid with exactly one tag in field</span>
+
+<span class="kw">public</span> byte[] readTagMemory(TagFilter filter, <span class="kw">int</span> bank,
+                            <span class="kw">int</span> wordAddress, <span class="kw">int</span> wordCount) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>   writeTagMemory(TagFilter filter, <span class="kw">int</span> bank,
+                             <span class="kw">int</span> wordAddress, byte[] data) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>   writeEpc(TagFilter filter, byte[] newEpc) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>   blockWrite(TagFilter f, <span class="kw">int</span> bank, <span class="kw">int</span> addr, byte[] data);
+<span class="kw">public void</span>   blockErase(TagFilter f, <span class="kw">int</span> bank, <span class="kw">int</span> addr, <span class="kw">int</span> wordCount);
+<span class="kw">public void</span>   setVerifyWrites(<span class="kw">boolean</span> verify);   <span class="cm">// default true</span>
+
+BANK_RESERVED = 0, BANK_EPC = 1, BANK_TID = 2, BANK_USER = 3</code></pre>
+
+<h3 id="s411"><span class="sn">4.11</span>Tag security: kill, lock, passwords</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-SEC-01</td><td>The API shall permanently kill a tag, requiring a non-zero kill password.</td><td class="mono">0x05</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-SEC-02</td><td>Kill shall require the <code>UHF_WRITE</code> permission and shall be refused when the supplied password is all zeros, which would kill unconditionally.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-SEC-03</td><td>The API shall set lock state on each lockable region: kill password, access password, EPC bank, TID bank, user memory.</td><td class="mono">0x06</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-SEC-04</td><td>The API shall express the four lock states — unlocked, locked, permanently unlocked, permanently locked — as named constants, and shall require an explicit confirmation flag for either permanent state.</td><td class="mono">0x06</td><td><span class="chip u">Confirm</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-SEC-05</td><td>The API shall set a tag's access and kill passwords through the reserved bank.</td><td class="mono">0x03</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-SEC-06</td><td>The API shall expose block permalock for tags supporting it.</td><td class="mono">0x13</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-SEC-07</td><td>Every irreversible operation — kill, permalock, permanent lock — shall be recorded in the system event log with the calling package and the target EPC.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<div class="note">
+  <span class="t">Design note</span>
+  <p>Kill and permalock destroy inventory permanently and cannot be undone by any subsequent command. The API makes them awkward on purpose: a dedicated confirmation parameter, a distinct permission, and a mandatory audit entry. An SDK that lets a typo brick a pallet of tags is a defect regardless of what the wire protocol permits.</p>
+</div>
+
+<pre><code><span class="kw">public void</span> killTag(TagFilter filter, byte[] killPassword) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span> lockTag(TagFilter filter, <span class="kw">int</span> region, <span class="kw">int</span> lockState,
+                    byte[] accessPassword, <span class="kw">boolean</span> confirmIrreversible);
+<span class="kw">public void</span> setAccessPassword(TagFilter f, byte[] oldPw, byte[] newPw);
+<span class="kw">public void</span> setKillPassword(TagFilter f, byte[] accessPw, byte[] newKillPw);
+<span class="kw">public void</span> blockPermalock(TagFilter f, <span class="kw">int</span> bank, <span class="kw">int</span> blockPtr,
+                           byte[] mask, <span class="kw">boolean</span> confirmIrreversible);
+
+LOCK_REGION_KILL_PW, LOCK_REGION_ACCESS_PW,
+LOCK_REGION_EPC, LOCK_REGION_TID, LOCK_REGION_USER
+LOCK_OPEN, LOCK_LOCKED, LOCK_PERM_OPEN, LOCK_PERM_LOCKED</code></pre>
+
+<h3 id="s412"><span class="sn">4.12</span>Read protection</h3>
+<p>This reader family supports a vendor read-protection mechanism that renders a tag silent to ordinary inventory until protection is removed.</p>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-RDP-01</td><td>The API shall apply read protection to a tag selected by EPC.</td><td class="mono">0x09</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-RDP-02</td><td>The API shall apply read protection to the single tag in field without specifying an EPC.</td><td class="mono">0x08</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-RDP-03</td><td>The API shall remove read protection.</td><td class="mono">0x0A</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-RDP-04</td><td>The API shall query whether the tag in field is read-protected.</td><td class="mono">0x0B</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-RDP-05</td><td>The API shall apply read protection selected by TID rather than EPC.</td><td class="mono">0x12</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-RDP-06</td><td>The API documentation shall state that read protection is a vendor extension, not part of EPC C1G2, and may not work on tags from other silicon vendors.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<h3 id="s413"><span class="sn">4.13</span>EAS — electronic article surveillance</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-EAS-01</td><td>The API shall set and clear a tag's EAS alarm bit.</td><td class="mono">0x0C</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-EAS-02</td><td>The API shall perform EAS alarm detection and report whether any alarming tag is in the field.</td><td class="mono">0x0D</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-EAS-03</td><td>The API shall offer a continuous EAS watch that delivers alarm events through a callback, for gate applications.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p3">P3</span></td></tr>
+</table></div>
+
+<h3 id="s414"><span class="sn">4.14</span>Vendor tag extensions</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-EXT-01</td><td>The API shall expose Impinj Monza QT read and write for tags that support public/private mode switching.</td><td class="mono">0x50</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-EXT-02</td><td>The API shall expose mixed inventory returning EPC together with TID and optionally user memory in one round.</td><td class="mono">0x16</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-EXT-03</td><td>The API shall expose EPC+TID inventory, for applications that need the unique chip serial rather than the writable EPC.</td><td class="mono">0x17</td><td><span class="chip u">Confirm</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-EXT-04</td><td>Each vendor extension shall be individually capability-gated, and shall throw <code>UnsupportedOperationException</code> where the connected reader does not advertise it.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<h3 id="s415"><span class="sn">4.15</span>GPIO, relay, buzzer and Wiegand</h3>
+<p>These are reader-side peripherals, not board GPIOs. They matter for door controllers and standalone gates where the reader drives the indicator and lock directly.</p>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-IO-01</td><td>The API shall read the reader's GPIO input states.</td><td class="mono">0x36</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-IO-02</td><td>The API shall set the reader's GPIO output states.</td><td class="mono">0x35</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-IO-03</td><td>The API shall drive relay outputs with an optional automatic release after a hold time.</td><td class="mono">0x35</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-IO-04</td><td>The API shall control the reader's buzzer and indicator, including a beep-on-read mode.</td><td class="mono">0x29</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-IO-05</td><td>The API shall configure Wiegand output: format (26 or 34 bit), pulse width, pulse interval, and byte order.</td><td class="mono">0x37</td><td><span class="chip u">Confirm</span></td><td><span class="chip p3">P3</span></td></tr>
+<tr><td class="id">FR-IO-06</td><td>Peripheral control shall require <code>UHF_CONFIGURE</code>, since driving a relay is a physical-world side effect.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<h3 id="s416"><span class="sn">4.16</span>Diagnostics and raw passthrough</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th class="mono" style="width:60px">Cmd</th><th style="width:96px">Status</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">FR-DIA-01</td><td>The API shall provide a raw transaction call accepting a command code and payload, returning the decoded response frame. The HAL builds the framing and CRC; the caller never computes either.</td><td class="mono">any</td><td><span class="chip v">Verified</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-DIA-02</td><td>Raw passthrough shall require <code>UHF_RAW</code>, a signature-level permission, and shall be unavailable on user builds without it.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-DIA-03</td><td>The HAL shall support an optional frame trace that logs every transmitted and received frame as annotated hex.</td><td class="mono">—</td><td><span class="chip v">Verified</span></td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">FR-DIA-04</td><td>The service shall expose <code>dumpsys uhf</code> reporting connection state, active session and package, current configuration, stream statistics, and the last sixteen errors.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">FR-DIA-05</td><td>The API shall expose a self-test returning link, identity, antenna and inventory results as a structured pass/fail report.</td><td class="mono">—</td><td><span class="chip d">Documented</span></td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<pre><code><span class="kw">public</span> UhfResponse rawTransact(<span class="kw">int</span> command, byte[] payload) <span class="kw">throws</span> UhfException;
+<span class="kw">public void</span>        setFrameTraceEnabled(<span class="kw">boolean</span> enabled);
+<span class="kw">public</span> SelfTestReport selfTest();</code></pre>
+
+<h2 id="s5"><span class="sn">5</span>External interface requirements</h2>
+
+<h3><span class="sn">5.1</span>Obtaining the manager</h3>
+<p><code>UhfManager</code> is a standard system service, retrieved the way every other one is. <code>Context.UHF_SERVICE</code> is added in <code>frameworks/base/core/java/android/content/Context.java</code>.</p>
+<pre><code>UhfManager uhf = (UhfManager) context.getSystemService(Context.UHF_SERVICE);
+<span class="kw">if</span> (uhf == <span class="kw">null</span> || !uhf.isReaderAvailable()) { <span class="cm">/* no reader on this device */</span> }
+
+<span class="kw">try</span> (UhfSession s = uhf.openSession()) {
+    s.setEnabledAntennas(UhfManager.ANTENNA_1);   <span class="cm">// 131 reads/sec; see §2.4</span>
+    s.setRfPower(20);                             <span class="cm">// safe ceiling; see FR-PWR-03</span>
+    s.setStreamParams(<span class="kw">new</span> StreamParams.Builder()
+            .setFilterTimeMs(0).setQValue(4).setSession(UhfManager.SESSION_S0)
+            .setBatchWindowMs(50).build());
+    s.startStreaming(getMainExecutor(), batch -&gt; render(batch));
+    <span class="cm">// ...</span>
+    s.stopStreaming();
+}</code></pre>
+
+<h3><span class="sn">5.2</span>AIDL — service interface</h3>
+<pre><code><span class="cm">// frameworks/base/core/java/android/hardware/uhf/IUhfService.aidl</span>
+<span class="kw">interface</span> IUhfService {
+    boolean            isReaderAvailable();
+    List&lt;UhfDeviceInfo&gt; getReaders();
+    IBinder            openSession(String readerId, IBinder clientToken, String pkg);
+    <span class="kw">void</span>               closeSession(IBinder sessionToken);
+
+    UhfReaderInfo      getReaderInfo(IBinder s);
+    <span class="kw">void</span>               setEnabledAntennas(IBinder s, <span class="kw">int</span> mask);
+    <span class="kw">int</span>                getEnabledAntennas(IBinder s);
+    <span class="kw">void</span>               setAntennaCheckEnabled(IBinder s, boolean on);
+    <span class="kw">void</span>               setRfPower(IBinder s, <span class="kw">int</span> power, boolean override);
+    <span class="kw">void</span>               setRegion(IBinder s, <span class="kw">int</span> band, <span class="kw">int</span> minPt, <span class="kw">int</span> maxPt);
+    <span class="kw">void</span>               setScanTimeMs(IBinder s, <span class="kw">int</span> ms);
+    <span class="kw">void</span>               setBaudRate(IBinder s, <span class="kw">int</span> baud);
+
+    List&lt;UhfTag&gt;       inventory(IBinder s, <span class="kw">in</span> InventoryParams p);
+    UhfTag             inventorySingle(IBinder s);
+
+    <span class="kw">void</span>               setStreamParams(IBinder s, <span class="kw">in</span> StreamParams p);
+    <span class="kw">void</span>               startStreaming(IBinder s, IUhfTagCallback cb);
+    <span class="kw">void</span>               stopStreaming(IBinder s);
+    StreamStats        getStreamStats(IBinder s);
+
+    <span class="kw">void</span>               startBufferedInventory(IBinder s, <span class="kw">in</span> InventoryParams p);
+    <span class="kw">int</span>                getBufferedTagCount(IBinder s);
+    List&lt;UhfTag&gt;       readBuffer(IBinder s);
+    <span class="kw">void</span>               clearBuffer(IBinder s);
+
+    byte[]             readTagMemory(IBinder s, <span class="kw">in</span> TagFilter f, <span class="kw">int</span> bank,
+                                     <span class="kw">int</span> addr, <span class="kw">int</span> count);
+    <span class="kw">void</span>               writeTagMemory(IBinder s, <span class="kw">in</span> TagFilter f, <span class="kw">int</span> bank,
+                                      <span class="kw">int</span> addr, <span class="kw">in</span> byte[] data);
+    <span class="kw">void</span>               writeEpc(IBinder s, <span class="kw">in</span> TagFilter f, <span class="kw">in</span> byte[] epc);
+    <span class="kw">void</span>               killTag(IBinder s, <span class="kw">in</span> TagFilter f, <span class="kw">in</span> byte[] killPw);
+    <span class="kw">void</span>               lockTag(IBinder s, <span class="kw">in</span> TagFilter f, <span class="kw">int</span> region,
+                               <span class="kw">int</span> state, <span class="kw">in</span> byte[] accessPw, boolean confirm);
+
+    <span class="kw">double</span>             measureReturnLoss(IBinder s, <span class="kw">int</span> antenna, <span class="kw">int</span> freqKhz);
+    UhfResponse        rawTransact(IBinder s, <span class="kw">int</span> cmd, <span class="kw">in</span> byte[] payload);
+
+    <span class="kw">void</span>               registerStateCallback(IUhfStateCallback cb);
+    <span class="kw">void</span>               unregisterStateCallback(IUhfStateCallback cb);
+}
+
+<span class="cm">// IUhfTagCallback.aidl — oneway: the HAL pump must never block on a client</span>
+<span class="kw">oneway interface</span> IUhfTagCallback {
+    <span class="kw">void</span> onTagsRead(<span class="kw">in</span> List&lt;UhfTag&gt; batch);
+    <span class="kw">void</span> onStreamError(<span class="kw">int</span> code, String message);
+    <span class="kw">void</span> onBatchesDropped(<span class="kw">int</span> count);
+}</code></pre>
+
+<h3><span class="sn">5.3</span>AIDL — HAL interface</h3>
+<div class="note hard">
+  <span class="t">Rev C — namespace, checked against this tree's own precedent</span>
+  <p>The <code>android.hardware.*</code> AIDL package is reserved for interfaces declared under <code>hardware/interfaces/</code> and carries VINTF/Treble compatibility obligations this HAL does not need — Rev B moved it to <code>hardware/rockchip/</code> for that reason. Rev B's guess at the package name itself, <code>vendor.rockchip.hardware.uhf</code>, was general Android vendor-HAL convention, not this tree's: the one existing custom Rockchip AIDL service already in this tree, <code>hardware/rockchip/hwc_proxy_service/</code> (package <code>rockchip.hwc.proxy.aidl</code>), uses the shorter <code>rockchip.&lt;name&gt;.aidl</code> shape, checked directly rather than assumed a second time. Only the HAL boundary changes — the system-service AIDL in &sect;5.2 and the <code>UhfManager</code> API remain <code>android.hardware.uhf.*</code>, since those are ordinary system-service surfaces, not a Treble HAL/framework boundary.</p>
+</div>
+<pre><code><span class="cm">// hardware/rockchip/uhf/aidl/rockchip/uhf/aidl/IUhfReader.aidl</span>
+<span class="kw">package</span> rockchip.uhf.aidl;
+
+<span class="kw">interface</span> IUhfReader {
+    <span class="kw">void</span>        open(String devicePath, <span class="kw">int</span> baud);
+    <span class="kw">void</span>        close();
+    boolean     isOpen();
+
+    <span class="cm">// Every reader command reduces to one framed transaction</span>
+    byte[]      transact(<span class="kw">int</span> cmd, <span class="kw">in</span> byte[] payload, <span class="kw">int</span> timeoutMs);
+
+    <span class="cm">// Streaming is the one path that does not fit request/response</span>
+    <span class="kw">void</span>        startStream(<span class="kw">in</span> StreamConfig cfg, IUhfReaderCallback cb);
+    <span class="kw">void</span>        stopStream();
+}
+
+<span class="cm">// rockchip/uhf/aidl/IUhfReaderCallback.aidl</span>
+<span class="kw">oneway interface</span> IUhfReaderCallback {
+    <span class="kw">void</span> onTagBatch(<span class="kw">in</span> RawTagRead[] batch);
+    <span class="kw">void</span> onError(<span class="kw">int</span> code);
+    <span class="kw">void</span> onDeviceLost();
+}</code></pre>
+<p>The HAL deliberately stays thin. It owns framing, CRC, resync, timing and the pump thread — everything that must be close to the wire — and leaves policy, permissions and arbitration to <code>UhfService</code>. A new reader command therefore usually needs no HAL change at all.</p>
+
+<h3><span class="sn">5.4</span>Permissions</h3>
+<div class="tw"><table>
+<tr><th>Permission</th><th style="width:130px">Protection</th><th>Gates</th></tr>
+<tr><td class="mono">android.permission.UHF_READ</td><td class="mono">normal</td><td>Session open, inventory, streaming, buffer read, tag memory read</td></tr>
+<tr><td class="mono">android.permission.UHF_WRITE</td><td class="mono">dangerous</td><td>Tag write, EPC rewrite, block write/erase, kill, lock, EAS, read protection</td></tr>
+<tr><td class="mono">android.permission.UHF_CONFIGURE</td><td class="mono">signature|privileged</td><td>Region, baud, power override, antenna mask, peripherals</td></tr>
+<tr><td class="mono">android.permission.UHF_RAW</td><td class="mono">signature</td><td>Raw passthrough, frame trace</td></tr>
+</table></div>
+<p>A device that ships the reader declares the feature so the Play-style filtering and <code>PackageManager</code> queries work:</p>
+<pre><code><span class="cm">// frameworks/base/core/java/android/content/pm/PackageManager.java</span>
+FEATURE_UHF_READER = <span class="kw">"android.hardware.uhf"</span>;
+
+<span class="cm">// device/rockchip/rk3576/rk3576_u/ — permissions XML</span>
+&lt;permissions&gt;&lt;feature name=<span class="kw">"android.hardware.uhf"</span> /&gt;&lt;/permissions&gt;</code></pre>
+
+<h3><span class="sn">5.5</span>Error model</h3>
+<p>Wire status codes are translated once, in the HAL, into a stable error enumeration. Applications never see a raw status byte. The mapping is normative.</p>
+<div class="tw"><table>
+<tr><th class="mono" style="width:70px">Status</th><th>Meaning on the wire</th><th class="mono">API error</th></tr>
+<tr><td class="mono">0x00</td><td>Success</td><td class="mono">—</td></tr>
+<tr><td class="mono">0x01</td><td>Inventory complete</td><td class="mono">— (normal)</td></tr>
+<tr><td class="mono">0x02</td><td>Inventory timeout, partial results</td><td class="mono">partial=true</td></tr>
+<tr><td class="mono">0x03</td><td>More frames follow</td><td class="mono">— (internal)</td></tr>
+<tr><td class="mono">0x04</td><td>Reader memory full</td><td class="mono">ERROR_BUFFER_FULL</td></tr>
+<tr><td class="mono">0xF8</td><td>Antenna check failure, whole command aborted</td><td class="mono">ERROR_ANTENNA_FAULT</td></tr>
+<tr><td class="mono">0xF9</td><td>Command execution error</td><td class="mono">ERROR_COMMAND_REJECTED</td></tr>
+<tr><td class="mono">0xFB</td><td>No operable tags in field</td><td class="mono">— (empty list)</td></tr>
+<tr><td class="mono">0xFD</td><td>Command length error</td><td class="mono">ERROR_PROTOCOL</td></tr>
+<tr><td class="mono">0xFE</td><td>Illegal command or CRC failure</td><td class="mono">ERROR_PROTOCOL</td></tr>
+<tr><td class="mono">0xFF</td><td>Parameter error</td><td class="mono">ERROR_INVALID_PARAMETER</td></tr>
+<tr><td class="mono">—</td><td>No reply within timeout</td><td class="mono">ERROR_TIMEOUT</td></tr>
+<tr><td class="mono">—</td><td>Device detached</td><td class="mono">ERROR_DEVICE_LOST</td></tr>
+<tr><td class="mono">—</td><td>Another app holds the session</td><td class="mono">ERROR_BUSY</td></tr>
+</table></div>
+<p><code>UhfException</code> carries the error code, a human-readable message, and — when tracing is on — the offending frame. <code>0xFB</code> and <code>0x01</code> are explicitly <em>not</em> exceptions: an empty field is an ordinary result and an API that throws on it forces every caller into a try/catch around normal operation.</p>
+
+<h2 id="s6"><span class="sn">6</span>Non-functional requirements</h2>
+
+<h3><span class="sn">6.1</span>Performance</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">NFR-P-01</td><td>The framework stack shall not reduce the measured hardware read rate by more than 5%. Acceptance baselines: <b>≥124 reads/sec</b> with one antenna and <b>≥49 reads/sec</b> with four, measured with fourteen tags at 115200 baud.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-P-02</td><td>Binder transaction rate for tag delivery shall not exceed 25 per second per client regardless of read rate.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-P-03</td><td>Latency from tag sighting to client callback shall not exceed 80&nbsp;ms at the 95th percentile with the default 50&nbsp;ms batch window.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-P-04</td><td>The HAL pump thread shall perform no heap allocation per tag in steady state; batch buffers shall be pooled and reused.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">NFR-P-05</td><td>A single inventory call shall return within <code>scanTime + 200&nbsp;ms</code>.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-P-06</td><td>Session open, from call to ready, shall complete within 1.5&nbsp;s on an already-attached reader.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">NFR-P-07</td><td>CPU attributable to the whole stack shall stay below 12% of one core at the one-antenna streaming baseline.</td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<div class="note measured">
+  <span class="t">How NFR-P-01 must be measured</span>
+  <p>Both traps from §4.8 apply to the acceptance test itself. Start the clock at the first delivered read, not at the start call, and reset all counters between runs. A test harness that gets either wrong will report a regression that is not there, or pass a stack that is 2× slower than the baseline.</p>
+</div>
+
+<h3><span class="sn">6.2</span>Reliability</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">NFR-R-01</td><td>A HAL crash shall not affect <code>system_server</code>. <code>init</code> shall restart it and clients shall receive <code>STATE_ERROR</code> followed by <code>STATE_READY</code>.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-R-02</td><td>The HAL shall survive an eight-hour continuous stream without leaking memory or file descriptors, and without accumulating unconsumed receive buffer.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-R-03</td><td>No read of the serial port shall block indefinitely; every read shall carry a timeout.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-R-04</td><td>A thousand consecutive detach/attach cycles shall leave the subsystem functional.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">NFR-R-05</td><td>Corrupt or truncated frames shall never crash the parser. A byte stream of random data shall be consumed without exception.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-R-06</td><td>The service shall recover a wedged reader by closing, reopening and re-identifying, at most three times before reporting <code>STATE_ERROR</code>.</td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<h3><span class="sn">6.3</span>Security and SELinux</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">NFR-S-01</td><td><code>/dev/ttyUSB*</code> for the reader shall be labelled <code>uhf_device</code> and opened only by domain <code>hal_uhf_default</code>. No app domain and not <code>system_server</code> shall hold open permission.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-S-02</td><td>The ueventd rule shall set ownership and mode on the reader's node only, matched by vendor and product ID, not on every <code>ttyUSB</code>.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-S-03</td><td>Every service entry point shall verify the caller's permission before touching session state, and shall verify the session token belongs to the calling UID.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-S-04</td><td>Tag EPCs shall not be written to logcat above <code>VERBOSE</code>, since an EPC can identify an item or a person.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-S-05</td><td>The build shall pass <code>sepolicy</code> neverallow checks with no permissive domains.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-S-06</td><td>Raw passthrough shall be compiled out or permission-denied on <code>user</code> builds unless the integrator opts in.</td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<h3><span class="sn">6.4</span>Concurrency, power, compatibility</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">NFR-C-01</td><td>The reader accepts one command per cycle; the HAL shall serialise all transactions on a single thread and queue concurrent callers.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-C-02</td><td>Blocking API calls shall throw if invoked on the main thread in debug builds, mirroring StrictMode conventions.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">NFR-C-03</td><td>Streaming shall stop when the owning app is no longer visible, unless it holds a foreground service, so a backgrounded app cannot hold the RF on.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-C-04</td><td>The HAL shall drop RF power to idle when no session is open.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">NFR-C-05</td><td>The API shall remain source and binary compatible across platform updates once released; additions only, governed by the API signature files.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">NFR-C-06</td><td>The subsystem shall be absent cleanly on devices without the feature flag — <code>getSystemService</code> returns null rather than throwing.</td><td><span class="chip p1">P1</span></td></tr>
+</table></div>
+
+<h2 id="s7"><span class="sn">7</span>Developer SDK</h2>
+<p>Third-party developers cannot build against <code>@SystemApi</code> or hidden framework classes with a public SDK. The SDK exists to close that gap.</p>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Requirement</th><th style="width:50px">Pri</th></tr>
+<tr><td class="id">SDK-01</td><td>Ship an AAR, <code>com.&lt;oem&gt;.uhf:uhf-sdk</code>, containing the public API surface, parcelables and constants.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">SDK-02</td><td>Ship a compile-only stub JAR generated from the platform API signature files, so the AAR links without the platform source.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">SDK-03</td><td>The SDK shall be a thin facade over <code>UhfManager</code>, adding no protocol logic of its own. A protocol fix in the platform shall not require an SDK release.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">SDK-04</td><td>The SDK shall degrade gracefully on a device without the feature: <code>UhfSdk.isSupported(context)</code> returns false rather than throwing at class-load time.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">SDK-05</td><td>Ship a reference application demonstrating every API group, buildable from a clean checkout with no platform source.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">SDK-06</td><td>Ship generated API reference plus a written integration guide covering permissions, the antenna/throughput tradeoff, and the power ceiling.</td><td><span class="chip p1">P1</span></td></tr>
+<tr><td class="id">SDK-07</td><td>Version the SDK semantically and independently of the platform build, with a stated compatibility matrix.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">SDK-08</td><td>Provide Kotlin coroutine and Flow adapters: <code>suspend fun inventory()</code> and <code>fun tagFlow(): Flow&lt;UhfTag&gt;</code>.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">SDK-09</td><td>Provide an offline fake reader implementation so developers can build and test without hardware.</td><td><span class="chip p2">P2</span></td></tr>
+<tr><td class="id">SDK-10</td><td>Publish to a Maven repository, with ProGuard/R8 consumer rules bundled.</td><td><span class="chip p2">P2</span></td></tr>
+</table></div>
+
+<pre><code><span class="cm">// Kotlin surface (SDK-08)</span>
+<span class="kw">val</span> uhf = UhfSdk.open(context)
+<span class="kw">val</span> tags: List&lt;UhfTag&gt; = uhf.inventory()
+
+uhf.tagFlow(StreamParams { antennas = ANTENNA_1; filterTimeMs = 0 })
+   .distinctUntilChangedBy { it.epcHex }
+   .collect { tag -&gt; println(<span class="kw">"${tag.epcHex}  rssi=${tag.rssi}"</span>) }</code></pre>
+
+<h2 id="s8"><span class="sn">8</span>AOSP integration</h2>
+<p>Paths are relative to the tree root, verified against the build server at <code>~/aosp17/3576_14os</code> (Android 14, SDK 34, UP1A).</p>
+
+<h3><span class="sn">8.1</span>Files added or modified</h3>
+<div class="tw"><table>
+<tr><th style="width:50px">#</th><th>Path</th><th style="width:74px">Action</th><th>Contents</th></tr>
+<tr><td class="mono">1</td><td class="mono">frameworks/base/core/java/android/hardware/uhf/</td><td>add</td><td><code>UhfManager</code>, <code>UhfSession</code>, parcelables, callbacks, exceptions</td></tr>
+<tr><td class="mono">2</td><td class="mono">frameworks/base/core/java/android/hardware/uhf/*.aidl</td><td>add</td><td><code>IUhfService</code>, <code>IUhfTagCallback</code>, <code>IUhfStateCallback</code></td></tr>
+<tr><td class="mono">3</td><td class="mono">frameworks/base/services/core/java/com/android/server/uhf/</td><td>add</td><td><code>UhfService</code>, session registry, HAL client, batch dispatcher</td></tr>
+<tr><td class="mono">4</td><td class="mono">frameworks/base/services/java/com/android/server/SystemServer.java</td><td>edit</td><td>Register the service in <code>startOtherServices()</code>, feature-gated</td></tr>
+<tr><td class="mono">5</td><td class="mono">frameworks/base/core/java/android/content/Context.java</td><td>edit</td><td><code>UHF_SERVICE</code> constant and <code>@ServiceName</code> annotation</td></tr>
+<tr><td class="mono">6</td><td class="mono">frameworks/base/core/java/android/app/SystemServiceRegistry.java</td><td>edit</td><td><code>registerService(UHF_SERVICE, UhfManager.class, …)</code></td></tr>
+<tr><td class="mono">7</td><td class="mono">frameworks/base/core/java/android/content/pm/PackageManager.java</td><td>edit</td><td><code>FEATURE_UHF_READER</code></td></tr>
+<tr><td class="mono">8</td><td class="mono">frameworks/base/core/res/AndroidManifest.xml</td><td>edit</td><td>The four permission declarations</td></tr>
+<tr><td class="mono">9</td><td class="mono">frameworks/base/core/api/current.txt, system-current.txt</td><td>edit</td><td>API signatures — regenerate with <code>m update-api</code>. <em>(Rev B: <code>frameworks/base/api/</code> does not hold these; each framework submodule keeps its own under <code>core/api/</code>, <code>services/api/</code>, etc. — this surface belongs in <code>core</code>.)</em></td></tr>
+<tr><td class="mono">10</td><td class="mono">hardware/rockchip/uhf/aidl/</td><td>add</td><td><code>IUhfReader</code>, <code>IUhfReaderCallback</code>, HAL parcelables, VINTF fragment, package <code>rockchip.uhf.aidl</code>. <em>(Rev B: moved from <code>hardware/interfaces/</code>, reserved for Google-defined core HALs. Rev C: package name corrected from a generic guess to this tree's own <code>rockchip.&lt;name&gt;.aidl</code> convention — see &sect;5.3.)</em></td></tr>
+<tr><td class="mono">11</td><td class="mono">hardware/rockchip/uhf/aidl/default/</td><td>add</td><td>Reference HAL: serial transport, framing, CRC16, pump thread</td></tr>
+<tr><td class="mono">12</td><td class="mono">device/rockchip/rk3576/rk3576_u/rk3576_u.mk</td><td>edit</td><td>Include the HAL, the permissions XML and the SDK stub in the image, scoped to this product only. <em>(Rev B: the path in the original draft, <code>.../rk3576_u/device.mk</code>, does not exist — the shared <code>device/rockchip/rk3576/device.mk</code> does, but it is inherited by <code>rk3576_ebook</code> too, so editing it would ship UHF on a product with no reader.)</em></td></tr>
+<tr><td class="mono">13</td><td class="mono">hardware/rockchip/uhf/aidl/default/rockchip.uhf-service.rc</td><td>add</td><td><code>service vendor.uhf-hal /vendor/bin/hw/rockchip.uhf-service</code>, class hal, user root / group system. <em>(Rev C: not a board <code>init.rk3576.rc</code> edit as Rev A sketched — wired in via the HAL's own <code>Android.bp</code> <code>init_rc</code> property instead, matching this tree's <code>hwc_proxy_service</code>/<code>power_aidl</code> precedent. Restriction is the SELinux domain transition, not the Linux uid — see &sect;8.2.)</em></td></tr>
+<tr><td class="mono">14</td><td class="mono">device/rockchip/rk3576/rk3576_u/ueventd.uhf.rc</td><td>add</td><td>Interim DAC permission for the Phase 1 JNI transport's <code>/dev/ttyUSB*</code> node access, copied via this product's <code>PRODUCT_COPY_FILES</code> only. <em>(Rev B: replaces a non-existent <code>ueventd.rk3576.rc</code>. Rev C: Phase 2 superseded this node's actual protection with the SELinux label below rather than a DAC group change — this file's group stays <code>system</code>, not a new dedicated group as Rev B's draft comment assumed; see &sect;8.2.)</em></td></tr>
+<tr><td class="mono">15</td><td class="mono">device/rockchip/common/rootdir/ueventd.rockchip.rc</td><td>edit</td><td>One line: <code>import /vendor/etc/ueventd.uhf.rc</code>. <em>(Rev B: this is the file that actually applies — it is shared by every Rockchip board, so the edit is a single precedented import, not a rule body; see &sect;8.2.)</em></td></tr>
+<tr><td class="mono">16</td><td class="mono">hardware/rockchip/uhf/aidl/default/sepolicy/ + device/rockchip/rk3576/rk3576_u/sepolicy/</td><td>add</td><td><code>hal_uhf.te</code> (domain, the <code>uhf_device</code> type declaration, and the client/server binder rules), <code>service.te</code> + <code>service_contexts</code> (required for an NDK-backend AIDL service — see &sect;8.2), and the HAL's own executable <code>file_contexts</code>, all board-independent under <code>hardware/rockchip/uhf/</code>; only the device-node path binding to <code>uhf_device</code> is board-specific, under <code>rk3576_u/sepolicy/file_contexts</code>. <em>(Rev C: not <code>device/rockchip/common/sepolicy/vendor/</code> as Rev A sketched — that directory is shared fleet-wide the same way &sect;8.2's ueventd file is, and this HAL follows <code>hwc_proxy_service</code>'s pattern of keeping HAL-scoped sepolicy alongside the HAL source instead.)</em></td></tr>
+<tr><td class="mono">17</td><td class="mono">device/rockchip/rk3576/overlay/</td><td>edit</td><td>Default antenna mask, safe power ceiling, batch window as config resources</td></tr>
+<tr><td class="mono">18</td><td class="mono">sdk/uhf-sdk/</td><td>add</td><td>AAR sources, stub generation, sample app, docs</td></tr>
+<tr><td class="mono">19</td><td class="mono">cts/tests/uhf/</td><td>add</td><td>Compatibility tests per §9</td></tr>
+</table></div>
+
+<h3><span class="sn">8.2</span>Device node ownership</h3>
+<p>The node is <code>crw------- root root</code> today, which is why the reference application had to claim the USB device from userspace and detach <code>ftdi_sio</code>. The HAL needs the node instead.</p>
+
+<div class="note hard">
+  <span class="t">Rev B — the shared-file trap</span>
+  <p>There is no per-board <code>ueventd.rk3576.rc</code>. Every Rockchip product that inherits <code>device/rockchip/common/device.mk</code> — <code>rk3576_u</code>, <code>rk3576_ebook</code>, and every other Rockchip board in this tree — gets its ueventd rules from one shared file, <code>device/rockchip/common/rootdir/ueventd.rockchip.rc</code>, copied by <code>rootdir.mk</code> to <code>/vendor/etc/ueventd.rc</code>. Writing the reader's rule body directly into that file would apply it fleet-wide.</p>
+  <p>The fix is the pattern the file already uses for exactly this problem: line 1 of <code>ueventd.rockchip.rc</code> is <code>import /vendor/etc/ueventd.car.rc</code> — an unconditional import of a fragment that only car products copy into the image. On every other board the import target is simply absent and the import is a no-op; this is proven safe by the shipped default configuration, which is a non-car product and boots fine today. The reader's rule follows the same shape, one level down (<code>ueventd.car.rc</code> itself imports <code>ueventd.rvcam.rc</code> the same way).</p>
+</div>
+
+<pre><code><span class="cm"># device/rockchip/common/rootdir/ueventd.rockchip.rc  (edit — one line, applies to every board)</span>
+import /vendor/etc/ueventd.car.rc
+<b>import /vendor/etc/ueventd.uhf.rc</b>
+
+<span class="cm"># device/rockchip/rk3576/rk3576_u/ueventd.uhf.rc  (add — new file)</span>
+<span class="cm"># Interim DAC rule for the Phase 1 JNI transport (system_server opened the</span>
+<span class="cm"># node directly, so it needed "system" group access). Phase 2's actual</span>
+<span class="cm"># protection is the SELinux label below, not a DAC change — this line does</span>
+<span class="cm"># NOT change group in Phase 2: the HAL runs as user root / group system too</span>
+<span class="cm"># (matching this tree's other custom AIDL services, &sect;8.1 row 13), and it is</span>
+<span class="cm"># the hal_uhf_default *domain* transition, not the Linux uid/gid, that stops</span>
+<span class="cm"># every other root/system process from opening a node labelled uhf_device.</span>
+<span class="cm"># TODO(OI-05): narrow past "every ttyUSB" — match this reader's USB</span>
+<span class="cm"># vendor/product ID via a DEVPATH-qualified rule once R1 confirms it.</span>
+/dev/ttyUSB*   0660   system   system
+
+<span class="cm"># device/rockchip/rk3576/rk3576_u/rk3576_u.mk  (edit — this product only)</span>
+PRODUCT_COPY_FILES += \
+    device/rockchip/rk3576/rk3576_u/ueventd.uhf.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.uhf.rc
+
+<span class="cm"># device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts  (Phase 2, board-specific:</span>
+<span class="cm"># this reader enumerates as ttyUSB0 on THIS board — a different board could differ)</span>
+/dev/ttyUSB[0-9]*   u:object_r:uhf_device:s0
+
+<span class="cm"># hardware/rockchip/uhf/aidl/default/sepolicy/hal_uhf.te  (Phase 2, board-independent)</span>
+type hal_uhf_default, domain;
+type hal_uhf_default_exec, exec_type, vendor_file_type, file_type;
+<span class="cm"># uhf_device is declared here, not device-side — any board using this HAL</span>
+<span class="cm"># labels its own reader's node with it via a file_contexts entry like the one above.</span>
+type uhf_device, dev_type, file_type;
+init_daemon_domain(hal_uhf_default)
+binder_use(hal_uhf_default)
+hal_attribute(uhf)
+hal_server_domain(hal_uhf_default, hal_uhf)
+hal_attribute_service(hal_uhf, hal_uhf_service)
+binder_call(hal_uhf_client, hal_uhf_server)
+binder_call(hal_uhf_server, hal_uhf_client)
+allow hal_uhf_default uhf_device:chr_file rw_file_perms;
+hal_client_domain(system_server, hal_uhf)  <span class="cm"># UhfHalTransport is a client; it never touches uhf_device itself</span>
+
+<span class="cm"># hardware/rockchip/uhf/aidl/default/sepolicy/service.te  (Phase 2 — Rev C addition)</span>
+<span class="cm"># Required because this is an NDK-backend AIDL service (AServiceManager_addService, not a</span>
+<span class="cm"># hwservicemanager entry) — Rev A's original sketch omitted this pair and would not have</span>
+<span class="cm"># compiled; caught by checking hardware/rockchip/hwc_proxy_service's own working example.</span>
+type hal_uhf_service, protected_service, hal_service_type, service_manager_type;
+
+<span class="cm"># hardware/rockchip/uhf/aidl/default/sepolicy/service_contexts  (Phase 2 — Rev C addition)</span>
+rockchip.uhf.aidl.IUhfReader/default   u:object_r:hal_uhf_service:s0</code></pre>
+
+<div class="note">
+  <span class="t">Constraint on the ueventd rule</span>
+  <p>Even scoped to this product, <code>/dev/ttyUSB*</code> still matches every USB serial device on this board, including a debug adapter someone plugs in for bring-up. NFR-S-02 requires narrowing this — by a <code>DEVPATH</code> match on the reader's vendor and product ID, or a udev-style symlink — before the rule ships as anything but a Phase&nbsp;1 development convenience. Tracked as <a href="#s11">OI-05</a>.</p>
+</div>
+
+<h3><span class="sn">8.3</span>Build and flash</h3>
+<pre><code>source build/envsetup.sh
+lunch rk3576_u-userdebug
+
+m update-api                      <span class="cm"># after any public API change</span>
+m framework services              <span class="cm"># framework + system service</span>
+m android.hardware.uhf-service    <span class="cm"># vendor HAL</span>
+m uhf-sdk                         <span class="cm"># SDK AAR + stub jar</span>
+m                                 <span class="cm"># full image</span>
+
+<span class="cm"># Incremental during development</span>
+adb root &amp;&amp; adb remount
+adb sync system vendor &amp;&amp; adb reboot</code></pre>
+
+<div class="note">
+  <span class="t">Development aid, not a shipped path</span>
+  <p><code>adb root</code> over a network adb connection drops the session — twice during bring-up this looked like the board had hung. Use the USB connection for <code>adb root</code>, or set <code>persist.adb.tcp.port</code> and reconnect afterwards.</p>
+</div>
+
+<h2 id="s9"><span class="sn">9</span>Verification and test</h2>
+
+<h3><span class="sn">9.1</span>Unit tests — host, no hardware</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Test</th><th>Passes when</th></tr>
+<tr><td class="id">TST-U-01</td><td>CRC16 over every captured frame in R3</td><td>Result is 0 for each complete frame</td></tr>
+<tr><td class="id">TST-U-02</td><td>Frame builder against captured command bytes</td><td>Byte-for-byte match, including CRC order</td></tr>
+<tr><td class="id">TST-U-03</td><td><code>0x21</code> decode of the captured 18-byte response</td><td>v1.24, EU band, 865.1–867.9 MHz, power 30, ports 1+2</td></tr>
+<tr><td class="id">TST-U-04</td><td>Multi-frame inventory assembly with status <code>0x03</code></td><td>All seven tags returned, none dropped</td></tr>
+<tr><td class="id">TST-U-05</td><td>Parser fed 1&nbsp;MB of random bytes</td><td>No exception, no unbounded buffer growth</td></tr>
+<tr><td class="id">TST-U-06</td><td>Resync past leading bytes below 4</td><td>Next valid frame is recovered</td></tr>
+<tr><td class="id">TST-U-07</td><td>Reply matching while tag frames are interleaved</td><td>Only the frame whose <code>reCmd</code> matches is accepted</td></tr>
+<tr><td class="id">TST-U-08</td><td>Status-to-error mapping table</td><td>Matches §5.5 exactly; <code>0xFB</code> yields an empty list, not a throw</td></tr>
+</table></div>
+
+<h3><span class="sn">9.2</span>Integration tests — hardware in the loop</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Test</th><th>Passes when</th></tr>
+<tr><td class="id">TST-I-01</td><td>Session exclusivity: second client opens while first holds</td><td>Second receives <code>ERROR_BUSY</code></td></tr>
+<tr><td class="id">TST-I-02</td><td>Client process killed mid-stream</td><td>Session released, reader back in answering mode within 2&nbsp;s</td></tr>
+<tr><td class="id">TST-I-03</td><td>Boot with the reader left in real-time mode</td><td>Service resets it; first session sees a quiet port</td></tr>
+<tr><td class="id">TST-I-04</td><td>Antenna mask write while antenna check is enabled</td><td>Succeeds via the check-off/write/check-on sequence</td></tr>
+<tr><td class="id">TST-I-05</td><td>Inventory with a faulty port in the mask</td><td>Raises <code>ERROR_ANTENNA_FAULT</code> naming the mask</td></tr>
+<tr><td class="id">TST-I-06</td><td>RF power set to 30 without the override flag</td><td>Rejected before reaching the reader</td></tr>
+<tr><td class="id">TST-I-07</td><td>USB detached mid-stream</td><td><code>onStreamError(ERROR_DEVICE_LOST)</code> within 2&nbsp;s</td></tr>
+<tr><td class="id">TST-I-08</td><td>Tag write then read-back on all writable banks</td><td>Data matches; verification catches an induced failure</td></tr>
+<tr><td class="id">TST-I-09</td><td>Eight-hour soak at the one-antenna streaming baseline</td><td>No FD or memory growth; rate within 5% at end</td></tr>
+</table></div>
+
+<h3><span class="sn">9.3</span>Performance acceptance</h3>
+<div class="tw"><table class="req">
+<tr><th style="width:96px">ID</th><th>Test</th><th>Gate</th></tr>
+<tr><td class="id">TST-P-01</td><td>Streaming, one antenna, 14 tags, 60&nbsp;s</td><td>≥ 124 reads/sec</td></tr>
+<tr><td class="id">TST-P-02</td><td>Streaming, four antennas, 14 tags, 60&nbsp;s</td><td>≥ 49 reads/sec</td></tr>
+<tr><td class="id">TST-P-03</td><td>Polled inventory loop, three antennas, 60&nbsp;s</td><td>≥ 26 reads/sec</td></tr>
+<tr><td class="id">TST-P-04</td><td>Binder transaction count during TST-P-01</td><td>≤ 25 per second per client</td></tr>
+<tr><td class="id">TST-P-05</td><td>Sighting-to-callback latency distribution</td><td>p95 ≤ 80 ms</td></tr>
+<tr><td class="id">TST-P-06</td><td>Total CPU across HAL, system_server and client</td><td>≤ 12% of one core</td></tr>
+</table></div>
+<p>All rate tests measure from the first delivered read and reset counters between runs, per NFR-P-01.</p>
+
+<h2 id="s10"><span class="sn">10</span>Risks and phasing</h2>
+
+<h3><span class="sn">10.1</span>Risks</h3>
+<div class="tw"><table>
+<tr><th style="width:84px">Risk</th><th>Description</th><th style="width:74px">Impact</th><th>Mitigation</th></tr>
+<tr><td class="id">RSK-01</td><td>Command codes marked <span class="chip u">Confirm</span> are wrong, invalidating §4.10–4.15.</td><td><span class="chip p1">High</span></td><td>Documentation pass in Phase&nbsp;1 gates all of it. The API surface is designed so only constants change.</td></tr>
+<tr><td class="id">RSK-02</td><td>The reader does not accept a baud rate above 115200, capping throughput at ~640 frames/sec forever.</td><td><span class="chip p1">High</span></td><td>Test early (OI-03). If confirmed, restate the throughput goal in the contract rather than engineering toward an unreachable number.</td></tr>
+<tr><td class="id">RSK-03</td><td>Binder overhead dominates at high read rates despite batching.</td><td><span class="chip p2">Med</span></td><td>Batch window is a runtime config resource. Shared-memory ring buffer held in reserve as a fallback.</td></tr>
+<tr><td class="id">RSK-04</td><td>SELinux policy for a vendor device node accessed through a system service proves awkward and tempts a permissive domain.</td><td><span class="chip p2">Med</span></td><td>The HAL split exists precisely to keep this clean. NFR-S-05 forbids permissive domains in the shipped build.</td></tr>
+<tr><td class="id">RSK-05</td><td>Faulty antenna port 3 on the development unit masks or mimics software faults.</td><td><span class="chip p2">Med</span></td><td>Exclude from default masks; obtain a known-good unit for acceptance testing.</td></tr>
+<tr><td class="id">RSK-06</td><td>Power supply brownout at high RF power is misdiagnosed as a software fault.</td><td><span class="chip p2">Med</span></td><td>Safe ceiling FR-PWR-03 plus an explicit note in the SDK integration guide.</td></tr>
+<tr><td class="id">RSK-07</td><td>The board's display panel does not render, so UI-based verification is unavailable.</td><td><span class="chip p3">Low</span></td><td>All acceptance tests are instrumented and logcat-based; no test depends on reading the screen.</td></tr>
+</table></div>
+
+<h3><span class="sn">10.2</span>Phasing</h3>
+<div class="tw"><table>
+<tr><th style="width:84px">Phase</th><th>Delivers</th><th>Exit criteria</th></tr>
+<tr><td><b>0 — Protocol</b></td><td>Documentation pass over R1; every <span class="chip u">Confirm</span> resolved; baud-rate ceiling established.</td><td>No <span class="chip u">Confirm</span> rows remain in §4. OI-01 to OI-04 closed.</td></tr>
+<tr><td><b>1 — Vertical slice</b></td><td>Manager, service, permissions, JNI transport (no HAL yet). Lifecycle, identity, antennas, power, polled inventory, streaming.</td><td>TST-U-*, TST-I-01…07, TST-P-01…03 pass.</td></tr>
+<tr><td><b>2 — HAL split</b></td><td>AIDL HAL, vendor process, SELinux policy, ueventd. JNI path removed.</td><td>NFR-R-01, NFR-S-01…05 pass. No permissive domains.</td></tr>
+<tr><td><b>3 — Tag operations</b></td><td>§4.10–4.14: memory access, security, protection, EAS, vendor extensions.</td><td>TST-I-08 passes across all banks and tag models in scope.</td></tr>
+<tr><td><b>4 — SDK</b></td><td>AAR, stub JAR, Kotlin adapters, fake reader, sample app, docs.</td><td>Sample app builds from a clean checkout with no platform source and exercises every API group.</td></tr>
+<tr><td><b>5 — Peripherals &amp; hardening</b></td><td>§4.15 GPIO/relay/buzzer/Wiegand, buffered auto-drain, soak and acceptance.</td><td>TST-I-09 and all TST-P-* pass. CTS suite green.</td></tr>
+</table></div>
+
+<h2 id="s11"><span class="sn">11</span>Open items</h2>
+<p>Each must be closed before the phase that depends on it. These are the questions this specification could not answer from the evidence available.</p>
+<div class="tw"><table>
+<tr><th style="width:74px">ID</th><th>Question</th><th style="width:74px">Blocks</th><th>How to close</th></tr>
+<tr><td class="id">OI-01</td><td>What are the true command codes for tag memory access, security, read protection, EAS and peripherals on <em>this</em> reader?</td><td>Phase 3</td><td>Documentation pass over R1 §8; verify each against hardware with a scratch tag.</td></tr>
+<tr><td class="id">OI-02</td><td>Which buffered-inventory commands does this firmware implement, and how large is the buffer?</td><td>Phase 5</td><td>R1 plus an empirical fill test.</td></tr>
+<tr><td class="id">OI-03</td><td>Does the reader accept 230400 or 460800 baud? R2 documents only up to 115200.</td><td>RSK-02</td><td>Send <code>0x28</code> with each candidate; reopen and re-identify. Reversible — worst case is a power cycle.</td></tr>
+<tr><td class="id">OI-04</td><td>Does the reader support per-antenna RF power, or only a global setting?</td><td>FR-PWR-04</td><td>R1; confirm by reading back after a per-antenna write.</td></tr>
+<tr><td class="id">OI-05</td><td>How should the ueventd rule identify the reader specifically rather than every <code>ttyUSB</code>?</td><td>Phase 2</td><td>Inspect the FTDI device's <code>DEVPATH</code> and vendor/product attributes; narrow the match.</td></tr>
+<tr><td class="id">OI-06</td><td>Is there a second reader model in scope? If so, capability negotiation moves from nice-to-have to structural.</td><td>Phase 1</td><td>Product decision.</td></tr>
+<tr><td class="id">OI-07</td><td>What tag population does the deployment actually involve? The throughput profile at 14 tags differs fundamentally from 500.</td><td>NFR-P-01</td><td>Product decision; re-baseline §2.4 against a representative population.</td></tr>
+<tr><td class="id">OI-08</td><td>Does the deployment need multiple concurrent reader apps? Exclusive sessions are assumed throughout.</td><td>FR-LC-03</td><td>Product decision. Shared read-only sessions are possible but change the arbitration model.</td></tr>
+</table></div>
+
+<hr>
+<p style="font-family:'IBM Plex Sans',sans-serif; font-size:12.5px; color:var(--muted); margin-bottom:0;">
+UHF-SRS-001 Rev&nbsp;C &middot; Draft for review &middot; Target AOSP 14 (SDK 34) on rockchip/rk3576/rk3576_u.
+Measured baselines in §2.4 and §6.1 were taken on the development board with fourteen tags at 115200&nbsp;baud and are reproducible with the harness in R4.
+Command codes marked <span class="chip u">Confirm</span> are inferences pending the documentation pass in Phase&nbsp;0.
+Rev&nbsp;B corrected three file paths against the actual tree, renamespaced the HAL AIDL package, and added FR-STR-13, FR-BUF-07 and FR-LC-09 to close state-interaction and crash-persistence gaps in Rev&nbsp;A.
+Rev&nbsp;C corrected the HAL package name and the &sect;8.1/&sect;8.2 file layout against this tree's own working precedent (<code>hardware/rockchip/hwc_proxy_service/</code>) once Phase 2 was actually implemented against it, and added the <code>service_contexts</code>/<code>protected_service</code> pair Rev A's sepolicy sketch had omitted (see the Rev C changelog note in §1).
+</p>
+
+</div>
+</main>
+</div>
+
+</body></html>

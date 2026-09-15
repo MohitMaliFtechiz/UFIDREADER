@@ -1,0 +1,36 @@
+From bbf87da5df72a8f8ef64ee6755a6b82087354e0b Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 09:32:36 +0200
+Subject: [PATCH] ueventd: import the per-product UHF reader node-permission
+ fragment
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+One line, following the precedent this file already uses for exactly this
+problem (line 1's 'import /vendor/etc/ueventd.car.rc'): a no-op on every
+board that doesn't copy ueventd.uhf.rc into its image, since ueventd's
+import silently skips a missing target. This file is shared by every
+Rockchip product that inherits device/rockchip/common/device.mk — putting
+the reader's actual rule body here directly, as UHF-SRS-001 Rev A's draft
+originally sketched, would have applied it fleet-wide instead of to the
+one product that has the reader (see the rk3576_u commit for that file).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ rootdir/ueventd.rockchip.rc | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/rootdir/ueventd.rockchip.rc b/rootdir/ueventd.rockchip.rc
+index bd0cf57..f8a35a8 100644
+--- a/rootdir/ueventd.rockchip.rc
++++ b/rootdir/ueventd.rockchip.rc
+@@ -1,4 +1,5 @@
+ import /vendor/etc/ueventd.car.rc
++import /vendor/etc/ueventd.uhf.rc
+ 
+ #for sensors
+ /dev/mma8452_daemon       0660   system     system
+-- 
+2.34.1
+

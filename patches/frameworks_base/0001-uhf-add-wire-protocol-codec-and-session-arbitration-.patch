@@ -1,0 +1,2473 @@
+From 3e8395f33e3329dc46e15e73575d59bb6dda31e2 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 08:58:28 +0200
+Subject: [PATCH 1/4] uhf: add wire-protocol codec and session arbitration core
+ (Phase 1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Implements UHF-SRS-001 (Rev B) Phase 1's hardware-independent core, kept
+deliberately separate from AIDL/Binder plumbing so it is unit-testable on
+the host without a framework build or reader hardware:
+
+- UhfProtocol: CRC16, frame build/parse with FR-LNK-03/04/06 resync and
+  reCmd matching, the §5.5 status->error mapping, the 0x21 identify decode
+  (FR-INF-01..03), the §4.4 band-formula table, and multi-frame inventory
+  assembly + tag-record decode (FR-INV-02/03/10). Implements TST-U-01..08
+  from the SRS's own test plan plus additional edge cases (fuzzed random
+  input, CRC-corrupted-frame stall recovery, truncated/malformed payloads).
+  One real bug found via testing and fixed: a CRC-corrupted byte can look
+  like a plausible oversized length prefix, stalling scan() forever on a
+  closed stream with no more bytes coming; added scanWithStallRecovery()
+  to pair frame recovery with FR-LNK-05's inter-byte timeout instead of
+  leaving that pairing as an implicit, easy-to-miss caller responsibility.
+
+- UhfTransport: the interface UhfSessionArbiter programs against, so the
+  Phase 1 JNI transport and the eventual Phase 2 HAL proxy are swappable
+  without touching arbitration policy (SRS §3.2's HAL-split boundary).
+
+- UhfSessionArbiter: session exclusivity and crash recovery (FR-LC-03/04),
+  the unconditional boot-time real-time-mode reset and region reassertion
+  (FR-LC-05/09), the antenna-check interlock ordering (FR-ANT-02), the RF
+  power safety ceiling (FR-PWR-02/03), and the streaming/buffered mutual
+  exclusion with auto-restart (FR-STR-08/13, FR-BUF-07) added in SRS Rev B.
+
+65/65 tests pass, compiled and run standalone against junit-4.12 (host
+JDK 11, no Android framework/AOSP build required for this layer).
+
+Not yet done: AIDL (IUhfService/IUhfTagCallback/IUhfStateCallback), the
+UhfManager/UhfSession client API, UhfService's Binder wrapper around this
+arbiter, the JNI serial transport, and the Context/PackageManager/
+SystemServiceRegistry/SystemServer/AndroidManifest edits from SRS §8.1.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../com/android/server/uhf/UhfProtocol.java   | 613 +++++++++++++++
+ .../android/server/uhf/UhfSessionArbiter.java | 420 +++++++++++
+ .../com/android/server/uhf/UhfTransport.java  |  70 ++
+ .../server/uhf/UhfTransportException.java     |  36 +
+ .../android/server/uhf/UhfProtocolTest.java   | 711 ++++++++++++++++++
+ .../server/uhf/UhfSessionArbiterTest.java     | 525 +++++++++++++
+ 6 files changed, 2375 insertions(+)
+ create mode 100644 services/core/java/com/android/server/uhf/UhfProtocol.java
+ create mode 100644 services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+ create mode 100644 services/core/java/com/android/server/uhf/UhfTransport.java
+ create mode 100644 services/core/java/com/android/server/uhf/UhfTransportException.java
+ create mode 100644 services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java
+ create mode 100644 services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+
+diff --git a/services/core/java/com/android/server/uhf/UhfProtocol.java b/services/core/java/com/android/server/uhf/UhfProtocol.java
+new file mode 100644
+index 00000000..e10aa9f7
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfProtocol.java
+@@ -0,0 +1,613 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Wire-protocol codec for the UHF RFID reader (UHF-SRS-001 R1/R2).
++ *
++ * <p>This class owns exactly what the reader's wire format requires and nothing else: framing,
++ * CRC16, resync-on-corruption, reply matching, and decoding the handful of response payloads this
++ * phase of the platform needs (identify, inventory). It has no dependency on Android framework
++ * classes and no I/O of its own — {@link UhfTransport} supplies raw bytes, this class turns them
++ * into {@link Frame}s and back. That separation is deliberate: per UHF-SRS-001 &sect;3.2, this
++ * logic is the part that later moves into the vendor HAL essentially unchanged, and it is the part
++ * with the highest cost of being wrong (FR-LNK-06's note describes a corrupted-command failure
++ * mode that a naive implementation reproduces easily).
++ *
++ * <p><b>What is settled vs. assumed.</b> The frame shape, the requirement that CRC over the whole
++ * frame (including its own CRC bytes) come out to zero, the resync rule, and the reCmd-matching
++ * rule are all directly and unambiguously stated in UHF-SRS-001 &sect;4.3 and are implemented
++ * exactly as specified. The one thing the SRS does not pin down is the CRC16 variant: "CRC16" is
++ * an algorithm family, not one algorithm. This class assumes CRC-16/MODBUS (reflected, poly
++ * 0xA001, init 0xFFFF, no xorout) because that is the variant used by every other reader in this
++ * family's lineage that exposes this exact frame shape, but until R1/R3 is on disk (SRS OI-01)
++ * this is an inference, not a verified fact — see {@link #CRC16_INIT}. If it is wrong, exactly one
++ * constant changes; every test in UhfProtocolTest that depends on it is written against that same
++ * constant, not against a hand-computed magic number, so a wrong assumption fails loudly instead
++ * of silently.
++ */
++public final class UhfProtocol {
++
++    private UhfProtocol() {}
++
++    /** Minimum legal value of the on-wire Len byte: Adr + Cmd + CRC-L + CRC-H, no data. */
++    public static final int MIN_LEN_FIELD = 4;
++
++    /** Maximum on-wire Len byte value (it is a single unsigned byte). */
++    public static final int MAX_LEN_FIELD = 0xFF;
++
++    /**
++     * CRC-16/MODBUS initial register value. See the class doc: this is an inference pending R1,
++     * isolated to this one constant on purpose.
++     */
++    static final int CRC16_INIT = 0xFFFF;
++
++    // -------------------------------------------------------------------------------------------
++    // CRC16
++    // -------------------------------------------------------------------------------------------
++
++    /**
++     * Computes CRC-16/MODBUS (reflected, poly 0xA001, init {@link #CRC16_INIT}, xorout 0) over
++     * {@code length} bytes of {@code data} starting at {@code offset}.
++     */
++    public static int crc16(byte[] data, int offset, int length) {
++        if (data == null) {
++            throw new NullPointerException("data");
++        }
++        if (offset < 0 || length < 0 || offset + length > data.length) {
++            throw new IndexOutOfBoundsException(
++                    "offset=" + offset + " length=" + length + " data.length=" + data.length);
++        }
++        int crc = CRC16_INIT;
++        for (int i = 0; i < length; i++) {
++            crc ^= (data[offset + i] & 0xFF);
++            for (int bit = 0; bit < 8; bit++) {
++                boolean lsbSet = (crc & 0x0001) != 0;
++                crc >>>= 1;
++                if (lsbSet) {
++                    crc ^= 0xA001;
++                }
++            }
++        }
++        return crc & 0xFFFF;
++    }
++
++    /**
++     * Whether {@code data[offset..offset+length)} is a structurally complete frame whose trailing
++     * two bytes are its own correct CRC16, per FR-LNK-03: CRC is computed over the whole frame
++     * <em>including</em> its CRC bytes and must come out to zero.
++     */
++    public static boolean isCrcValid(byte[] data, int offset, int length) {
++        if (length < 2) {
++            return false;
++        }
++        return crc16(data, offset, length) == 0;
++    }
++
++    // -------------------------------------------------------------------------------------------
++    // Frame model and building
++    // -------------------------------------------------------------------------------------------
++
++    /** One decoded serial frame: {@code Len | Adr | Cmd | Data[] | CRC16-LSB | CRC16-MSB}. */
++    public static final class Frame {
++        /** Reader address; {@link #ADDRESS_BROADCAST} (0xFF) means "any reader". */
++        public final int address;
++        /** Command byte. On a reply this is {@code reCmd} — see {@link #reCmdMatches}. */
++        public final int command;
++        /** Payload bytes, i.e. everything between Cmd and the CRC. Never null; may be empty. */
++        public final byte[] data;
++        /** Total on-wire size of this frame in bytes, including the leading Len byte. */
++        public final int wireLength;
++
++        Frame(int address, int command, byte[] data, int wireLength) {
++            this.address = address;
++            this.command = command;
++            this.data = data;
++            this.wireLength = wireLength;
++        }
++
++        /**
++         * The first payload byte, by convention the reader's status/result code for the command
++         * families that use one (inventory, buffered inventory, real-time mode). Callers that
++         * know their command doesn't use a leading status byte (e.g. 0x21 identify) should not
++         * call this and should index {@link #data} directly instead.
++         */
++        public int statusByte() {
++            if (data.length == 0) {
++                throw new IllegalStateException("frame for cmd 0x"
++                        + Integer.toHexString(command) + " carries no data/status byte");
++            }
++            return data[0] & 0xFF;
++        }
++    }
++
++    public static final int ADDRESS_BROADCAST = 0xFF;
++
++    /**
++     * Builds a complete on-wire frame for {@code command} with {@code payload} as its data,
++     * addressed to {@code address}, including a correct trailing CRC16.
++     */
++    public static byte[] buildFrame(int address, int command, byte[] payload) {
++        if (payload == null) {
++            payload = new byte[0];
++        }
++        int len = 2 + payload.length + 2; // Adr + Cmd + Data + CRC16(2)
++        if (len > MAX_LEN_FIELD) {
++            throw new IllegalArgumentException(
++                    "payload too large: encoded Len " + len + " exceeds " + MAX_LEN_FIELD);
++        }
++        byte[] frame = new byte[1 + len];
++        frame[0] = (byte) len;
++        frame[1] = (byte) address;
++        frame[2] = (byte) command;
++        System.arraycopy(payload, 0, frame, 3, payload.length);
++        int crc = crc16(frame, 0, 3 + payload.length);
++        frame[3 + payload.length] = (byte) (crc & 0xFF);         // CRC16-LSB
++        frame[3 + payload.length + 1] = (byte) ((crc >>> 8) & 0xFF); // CRC16-MSB
++        return frame;
++    }
++
++    // -------------------------------------------------------------------------------------------
++    // Parsing / resync
++    // -------------------------------------------------------------------------------------------
++
++    /** Outcome of one scan attempt over a receive buffer. */
++    public enum ScanOutcome {
++        /** A complete, CRC-valid frame was found at the scan start position. */
++        FRAME,
++        /** Not enough bytes buffered yet to know either way; keep the bytes and read more. */
++        NEED_MORE_DATA,
++        /**
++         * The byte(s) at the scan start position cannot begin a valid frame (FR-LNK-04): either
++         * the leading byte is below {@link #MIN_LEN_FIELD}, or a full-length frame's CRC did not
++         * check out. The caller must discard exactly {@link ScanResult#bytesToDiscard} byte(s)
++         * and scan again — never discard the whole buffer, or a real frame one byte later is
++         * lost along with the garbage.
++         */
++        RESYNC,
++    }
++
++    /** Result of one {@link #scan} call. */
++    public static final class ScanResult {
++        public final ScanOutcome outcome;
++        /** Valid only when {@code outcome == FRAME}. */
++        public final Frame frame;
++        /** Valid only when {@code outcome == RESYNC}: how many leading bytes to drop. */
++        public final int bytesToDiscard;
++
++        private ScanResult(ScanOutcome outcome, Frame frame, int bytesToDiscard) {
++            this.outcome = outcome;
++            this.frame = frame;
++            this.bytesToDiscard = bytesToDiscard;
++        }
++
++        static ScanResult frame(Frame f) {
++            return new ScanResult(ScanOutcome.FRAME, f, 0);
++        }
++
++        static ScanResult needMoreData() {
++            return new ScanResult(ScanOutcome.NEED_MORE_DATA, null, 0);
++        }
++
++        static ScanResult resync(int bytesToDiscard) {
++            return new ScanResult(ScanOutcome.RESYNC, null, bytesToDiscard);
++        }
++    }
++
++    /**
++     * Scans for one frame starting at {@code buf[offset]}, within the {@code length} valid bytes
++     * available. Implements FR-LNK-03/04 exactly: a leading length byte below
++     * {@link #MIN_LEN_FIELD} is immediately unrecoverable garbage (discard 1 byte and rescan); a
++     * structurally complete candidate frame whose CRC does not check out is also discarded one
++     * byte at a time, never assumed to be "nearly right" and repaired.
++     *
++     * <p>This method never throws on malformed input and never reads past {@code offset+length}
++     * — see UhfProtocolTest's fuzz test (NFR-R-05: "a byte stream of random data shall be consumed
++     * without exception").
++     */
++    public static ScanResult scan(byte[] buf, int offset, int length) {
++        if (length <= 0) {
++            return ScanResult.needMoreData();
++        }
++        int lenField = buf[offset] & 0xFF;
++        if (lenField < MIN_LEN_FIELD) {
++            return ScanResult.resync(1);
++        }
++        int wireLength = 1 + lenField;
++        if (length < wireLength) {
++            return ScanResult.needMoreData();
++        }
++        if (!isCrcValid(buf, offset, wireLength)) {
++            return ScanResult.resync(1);
++        }
++        int address = buf[offset + 1] & 0xFF;
++        int command = buf[offset + 2] & 0xFF;
++        int dataLen = lenField - 4; // Adr + Cmd + CRC16(2) accounted for
++        byte[] data = new byte[dataLen];
++        System.arraycopy(buf, offset + 3, data, 0, dataLen);
++        return ScanResult.frame(new Frame(address, command, data, wireLength));
++    }
++
++    /**
++     * Like {@link #scan}, but additionally implements FR-LNK-05's half of frame recovery: a
++     * leading length byte can be syntactically valid (&gt;= {@link #MIN_LEN_FIELD}) while actually
++     * being corrupted receive noise that happens to decode to a large value — for example, the
++     * CRC byte of a previous corrupted frame, reinterpreted as the next frame's length prefix. A
++     * bare {@link #scan} correctly reports {@link ScanOutcome#NEED_MORE_DATA} for that case: it
++     * cannot know the candidate is bogus without the bytes its own length field promises. That is
++     * exactly right on a live, still-receiving connection, and wrong forever on a stalled one —
++     * FR-LNK-05 specifies the reader-side half of this ("keep the inter-byte gap below 15&nbsp;ms
++     * or the reader discards the partial frame"); this is the receive-side half of the same idea.
++     *
++     * @param staleTimeoutElapsed whether the transport's inter-byte timeout (FR-LNK-05) has
++     *     elapsed since the last byte was appended to this buffer with no new bytes arriving. When
++     *     {@code false} this behaves exactly like {@link #scan}. When {@code true} and the
++     *     underlying scan is still waiting on more bytes, the leading byte is treated as receive
++     *     noise and discarded — the same one-byte-at-a-time recovery {@link #scan} already applies
++     *     to a bad CRC, just triggered by a stall instead of a checksum mismatch.
++     */
++    public static ScanResult scanWithStallRecovery(
++            byte[] buf, int offset, int length, boolean staleTimeoutElapsed) {
++        ScanResult r = scan(buf, offset, length);
++        if (r.outcome == ScanOutcome.NEED_MORE_DATA && length > 0 && staleTimeoutElapsed) {
++            return ScanResult.resync(1);
++        }
++        return r;
++    }
++
++    /**
++     * FR-LNK-06: a reply is only accepted as the answer to {@code sentCommand} if its echoed
++     * command byte equals what was sent — a structurally valid, CRC-correct frame is not enough,
++     * because in real-time mode the port is flooded with unsolicited 0xEE tag frames that pass
++     * both those checks.
++     */
++    public static boolean reCmdMatches(Frame reply, int sentCommand) {
++        return reply.command == sentCommand;
++    }
++
++    // -------------------------------------------------------------------------------------------
++    // Status -> API error mapping (SRS §5.5, normative)
++    // -------------------------------------------------------------------------------------------
++
++    public static final int STATUS_INVENTORY_COMPLETE = 0x01;
++    public static final int STATUS_INVENTORY_TIMEOUT_PARTIAL = 0x02;
++    public static final int STATUS_MORE_FRAMES_FOLLOW = 0x03;
++    public static final int STATUS_READER_MEMORY_FULL = 0x04;
++    public static final int STATUS_ANTENNA_CHECK_FAILURE = 0xF8;
++    public static final int STATUS_COMMAND_EXECUTION_ERROR = 0xF9;
++    public static final int STATUS_NO_OPERABLE_TAGS = 0xFB;
++    public static final int STATUS_COMMAND_LENGTH_ERROR = 0xFD;
++    public static final int STATUS_ILLEGAL_COMMAND_OR_CRC = 0xFE;
++    public static final int STATUS_PARAMETER_ERROR = 0xFF;
++
++    /** Stable API error codes surfaced to {@code UhfException}. 0 means "not an error". */
++    public static final int ERROR_NONE = 0;
++    public static final int ERROR_BUFFER_FULL = 1;
++    public static final int ERROR_ANTENNA_FAULT = 2;
++    public static final int ERROR_COMMAND_REJECTED = 3;
++    public static final int ERROR_PROTOCOL = 4;
++    public static final int ERROR_INVALID_PARAMETER = 5;
++    public static final int ERROR_TIMEOUT = 6;
++    public static final int ERROR_DEVICE_LOST = 7;
++    public static final int ERROR_BUSY = 8;
++
++    /**
++     * Maps a reader status byte to the stable API error per SRS §5.5. {@code 0x00}, {@code 0x01}
++     * and {@code 0xFB} map to {@link #ERROR_NONE} deliberately: success, "inventory complete", and
++     * "no tags in field" are all ordinary outcomes, not exceptions (FR-INV-08) — a caller that
++     * throws on an empty field forces every inventory call into a try/catch for a non-error.
++     * {@code 0x03} ("more frames follow") is internal to frame assembly and must never reach this
++     * method; passing it is a bug in the caller, not a reader condition, so it throws rather than
++     * returning a plausible-looking wrong answer.
++     */
++    public static int mapStatusToError(int status) {
++        switch (status) {
++            case 0x00:
++            case STATUS_INVENTORY_COMPLETE:
++            case STATUS_NO_OPERABLE_TAGS:
++                return ERROR_NONE;
++            case STATUS_INVENTORY_TIMEOUT_PARTIAL:
++                return ERROR_NONE; // caller marks the result partial; not an exception
++            case STATUS_READER_MEMORY_FULL:
++                return ERROR_BUFFER_FULL;
++            case STATUS_ANTENNA_CHECK_FAILURE:
++                return ERROR_ANTENNA_FAULT;
++            case STATUS_COMMAND_EXECUTION_ERROR:
++                return ERROR_COMMAND_REJECTED;
++            case STATUS_COMMAND_LENGTH_ERROR:
++            case STATUS_ILLEGAL_COMMAND_OR_CRC:
++                return ERROR_PROTOCOL;
++            case STATUS_PARAMETER_ERROR:
++                return ERROR_INVALID_PARAMETER;
++            case STATUS_MORE_FRAMES_FOLLOW:
++                throw new IllegalArgumentException(
++                        "0x03 (more frames follow) is a continuation marker, not a terminal "
++                                + "status; the frame assembler must consume it, never the mapper");
++            default:
++                throw new IllegalArgumentException(
++                        "unmapped reader status 0x" + Integer.toHexString(status)
++                                + " — §5.5 has no row for this; add one rather than guessing");
++        }
++    }
++
++    // -------------------------------------------------------------------------------------------
++    // 0x21 — reader identity decode (FR-INF-01..03)
++    // -------------------------------------------------------------------------------------------
++
++    /** Decoded response to command 0x21 ("get reader information"). */
++    public static final class ReaderInfo {
++        public final int versionMajor;
++        public final int versionMinor;
++        public final int modelType;
++        public final boolean supportsIso18000_6c;
++        public final boolean supportsIso18000_6b;
++        public final int bandCode;
++        public final int maxRfPower;
++        public final int scanTimeUnits; // reader's native 100ms units; see FR-INV-07
++        public final int antennaMask;
++        public final boolean antennaCheckEnabled;
++
++        ReaderInfo(int versionMajor, int versionMinor, int modelType,
++                boolean supportsIso18000_6c, boolean supportsIso18000_6b, int bandCode,
++                int maxRfPower, int scanTimeUnits, int antennaMask, boolean antennaCheckEnabled) {
++            this.versionMajor = versionMajor;
++            this.versionMinor = versionMinor;
++            this.modelType = modelType;
++            this.supportsIso18000_6c = supportsIso18000_6c;
++            this.supportsIso18000_6b = supportsIso18000_6b;
++            this.bandCode = bandCode;
++            this.maxRfPower = maxRfPower;
++            this.scanTimeUnits = scanTimeUnits;
++            this.antennaMask = antennaMask;
++            this.antennaCheckEnabled = antennaCheckEnabled;
++        }
++
++        public String firmwareVersionString() {
++            return versionMajor + "." + versionMinor;
++        }
++    }
++
++    // Field offsets within the 0x21 response payload. FR-INF-02 is the load-bearing requirement
++    // here: Version is TWO bytes (major, minor), and every offset below is one higher than a
++    // naive one-byte-Version reading would produce. Getting this wrong doesn't fail loudly (see
++    // the SRS's "why FR-INF-02 is called out separately" note) — it produces a different,
++    // plausible-looking, wrong band/power/mask. The offsets are named constants for exactly that
++    // reason: a reviewer can check them against R1 without re-deriving the arithmetic.
++    private static final int OFF_VERSION_MAJOR = 0;
++    private static final int OFF_VERSION_MINOR = 1;
++    private static final int OFF_MODEL_TYPE = 2;
++    private static final int OFF_PROTOCOL_SUPPORT = 3; // bit0: 6C, bit1: 6B (Confirm; see OI-01)
++    private static final int OFF_DMAXFRE = 4;
++    private static final int OFF_DMINFRE = 5;
++    private static final int OFF_POWER = 6;
++    private static final int OFF_SCANTIME = 7;
++    private static final int OFF_ANTENNA_MASK = 8;
++    private static final int OFF_ANTENNA_CHECK = 9;
++    private static final int MIN_IDENTIFY_PAYLOAD_LEN = 10;
++
++    /**
++     * Decodes an 0x21 response payload per FR-INF-01..03. Throws {@link IllegalArgumentException}
++     * on a payload shorter than the fields this decode needs, rather than silently reading zeros
++     * — a truncated identify response is a protocol bug worth surfacing, not a set of defaults
++     * worth guessing (compare TST-U-03, which pins this decode against a full captured response).
++     */
++    public static ReaderInfo decodeReaderInfo(byte[] payload) {
++        if (payload == null || payload.length < MIN_IDENTIFY_PAYLOAD_LEN) {
++            throw new IllegalArgumentException("0x21 payload too short: "
++                    + (payload == null ? "null" : payload.length + " bytes") + ", need >= "
++                    + MIN_IDENTIFY_PAYLOAD_LEN);
++        }
++        int versionMajor = payload[OFF_VERSION_MAJOR] & 0xFF;
++        int versionMinor = payload[OFF_VERSION_MINOR] & 0xFF;
++        int modelType = payload[OFF_MODEL_TYPE] & 0xFF;
++        int protocolSupport = payload[OFF_PROTOCOL_SUPPORT] & 0xFF;
++        int dmaxfre = payload[OFF_DMAXFRE] & 0xFF;
++        int dminfre = payload[OFF_DMINFRE] & 0xFF;
++        int power = payload[OFF_POWER] & 0xFF;
++        int scanTime = payload[OFF_SCANTIME] & 0xFF;
++        int antennaMask = payload[OFF_ANTENNA_MASK] & 0xFF;
++        boolean antennaCheck = (payload[OFF_ANTENNA_CHECK] & 0xFF) != 0;
++
++        // FR-INF-03: band code = (dmaxfre >> 6) << 2 | (dminfre >> 6), verbatim from the SRS.
++        int bandCode = ((dmaxfre >> 6) << 2) | (dminfre >> 6);
++
++        return new ReaderInfo(versionMajor, versionMinor, modelType,
++                (protocolSupport & 0x01) != 0, (protocolSupport & 0x02) != 0,
++                bandCode, power, scanTime, antennaMask, antennaCheck);
++    }
++
++    // -------------------------------------------------------------------------------------------
++    // Region / frequency plan (§4.4, band formulae table — normative)
++    // -------------------------------------------------------------------------------------------
++
++    /** One row of the §4.4 band-formula table. */
++    public static final class BandPlan {
++        public final int code;
++        public final String name;
++        public final double startMhz;
++        public final double stepMhz;
++        public final int maxN;
++
++        BandPlan(int code, String name, double startMhz, double stepMhz, int maxN) {
++            this.code = code;
++            this.name = name;
++            this.startMhz = startMhz;
++            this.stepMhz = stepMhz;
++            this.maxN = maxN;
++        }
++
++        public double centerFrequencyMhz(int n) {
++            if (n < 0 || n > maxN) {
++                throw new IllegalArgumentException(
++                        "N=" + n + " out of range [0," + maxN + "] for band " + name);
++            }
++            return startMhz + n * stepMhz;
++        }
++    }
++
++    private static final BandPlan[] BAND_PLANS = {
++        new BandPlan(0b0001, "China band 2", 920.125, 0.25, 19),
++        new BandPlan(0b0010, "US", 902.75, 0.5, 49),
++        new BandPlan(0b0011, "Korea", 917.1, 0.2, 31),
++        new BandPlan(0b0100, "EU", 865.1, 0.2, 14),
++        new BandPlan(0b0110, "Ukraine", 868.0, 0.1, 6),
++        new BandPlan(0b0111, "Peru", 916.2, 0.9, 11),
++        new BandPlan(0b1000, "China band 1", 840.125, 0.25, 19),
++        new BandPlan(0b1001, "EU3", 865.7, 0.6, 3),
++        new BandPlan(0b1010, "Taiwan", 922.25, 0.5, 11),
++        new BandPlan(0b1100, "US band 3", 902.0, 0.5, 52),
++    };
++
++    /** Looks up the band plan for a band code, or {@code null} if the code is unassigned. */
++    public static BandPlan bandPlanForCode(int code) {
++        for (BandPlan p : BAND_PLANS) {
++            if (p.code == code) {
++                return p;
++            }
++        }
++        return null;
++    }
++
++    // -------------------------------------------------------------------------------------------
++    // Multi-frame inventory assembly (FR-INV-02/03) and payload decode (FR-INV-10)
++    // -------------------------------------------------------------------------------------------
++
++    /** One tag record extracted from an inventory response payload, per FR-INV-10. */
++    public static final class TagRecord {
++        public final byte[] epc;
++        /** Non-null only when the EPC+TID bit was set for this record. */
++        public final byte[] tid;
++        public final int rssi;
++
++        TagRecord(byte[] epc, byte[] tid, int rssi) {
++            this.epc = epc;
++            this.tid = tid;
++            this.rssi = rssi;
++        }
++    }
++
++    // FR-INV-10: "the EPC block length field's bit 7 (EPC+TID present) and bit 6 (phase and
++    // frequency data follow), masking the length to bits 5-0."
++    private static final int FLAG_EPC_TID_PRESENT = 0x80;
++    private static final int FLAG_PHASE_FREQ_PRESENT = 0x40;
++    private static final int LENGTH_MASK = 0x3F;
++
++    /**
++     * Concatenates the data payloads of a chain of inventory-response frames that share one
++     * {@code reCmd} while intermediate frames report {@link #STATUS_MORE_FRAMES_FOLLOW}
++     * (FR-INV-02), then decodes the result into individual tag records (FR-INV-10). The chain
++     * must be non-empty and every frame but the last must carry status 0x03; the last frame's
++     * status is returned separately so the caller can apply {@link #mapStatusToError} to it
++     * (FR-INV-03: the read terminates on any status other than 0x03, not a fixed idle timer, so
++     * the terminal status is a real caller-visible signal, not incidental).
++     */
++    public static List<TagRecord> assembleAndDecodeInventory(List<Frame> chain) {
++        if (chain == null || chain.isEmpty()) {
++            throw new IllegalArgumentException("empty frame chain");
++        }
++        int totalDataLen = 0;
++        for (int i = 0; i < chain.size(); i++) {
++            Frame f = chain.get(i);
++            boolean isLast = (i == chain.size() - 1);
++            int status = f.statusByte();
++            if (!isLast && status != STATUS_MORE_FRAMES_FOLLOW) {
++                throw new IllegalArgumentException(
++                        "frame " + i + " of " + chain.size() + " is not last but has status 0x"
++                                + Integer.toHexString(status) + " instead of 0x03");
++            }
++            if (isLast && status == STATUS_MORE_FRAMES_FOLLOW) {
++                throw new IllegalArgumentException(
++                        "last frame in chain still reports 0x03 (more frames follow) — caller "
++                                + "handed over an incomplete chain");
++            }
++            // status byte is not tag data; skip it when concatenating.
++            totalDataLen += f.data.length - 1;
++        }
++        byte[] combined = new byte[totalDataLen];
++        int pos = 0;
++        for (Frame f : chain) {
++            int n = f.data.length - 1;
++            System.arraycopy(f.data, 1, combined, pos, n);
++            pos += n;
++        }
++        return decodeTagRecords(combined);
++    }
++
++    /** Decodes a concatenated tag-record blob (post status-byte-stripping) per FR-INV-10. */
++    public static List<TagRecord> decodeTagRecords(byte[] data) {
++        List<TagRecord> out = new ArrayList<>();
++        int pos = 0;
++        while (pos < data.length) {
++            if (pos + 1 > data.length) {
++                throw new IllegalArgumentException("truncated tag record at offset " + pos);
++            }
++            int lenByte = data[pos] & 0xFF;
++            boolean hasTid = (lenByte & FLAG_EPC_TID_PRESENT) != 0;
++            boolean hasPhaseFreq = (lenByte & FLAG_PHASE_FREQ_PRESENT) != 0;
++            int epcWords = lenByte & LENGTH_MASK;
++            int epcBytes = epcWords * 2;
++            pos += 1;
++            if (pos + epcBytes > data.length) {
++                throw new IllegalArgumentException(
++                        "tag record at offset " + (pos - 1) + " declares " + epcBytes
++                                + " EPC bytes but only " + (data.length - pos) + " remain");
++            }
++            byte[] epc = new byte[epcBytes];
++            System.arraycopy(data, pos, epc, 0, epcBytes);
++            pos += epcBytes;
++
++            byte[] tid = null;
++            if (hasTid) {
++                if (pos + 1 > data.length) {
++                    throw new IllegalArgumentException("truncated TID length at offset " + pos);
++                }
++                int tidWords = data[pos] & 0xFF;
++                int tidBytes = tidWords * 2;
++                pos += 1;
++                if (pos + tidBytes > data.length) {
++                    throw new IllegalArgumentException("truncated TID data at offset " + pos);
++                }
++                tid = new byte[tidBytes];
++                System.arraycopy(data, pos, tid, 0, tidBytes);
++                pos += tidBytes;
++            }
++
++            if (hasPhaseFreq) {
++                // Phase/frequency trailer is documented but not yet needed by any Phase-1
++                // consumer; skip its fixed-size trailer rather than mis-parsing it as RSSI.
++                // Width is Confirm-status pending R1 — tracked alongside OI-01.
++                pos += 3;
++                if (pos > data.length) {
++                    throw new IllegalArgumentException(
++                            "phase/freq trailer runs past end of payload");
++                }
++            }
++
++            if (pos + 1 > data.length) {
++                throw new IllegalArgumentException("truncated RSSI byte at offset " + pos);
++            }
++            int rssi = data[pos] & 0xFF;
++            pos += 1;
++
++            out.add(new TagRecord(epc, tid, rssi));
++        }
++        return out;
++    }
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+new file mode 100644
+index 00000000..fbb6e7da
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+@@ -0,0 +1,420 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import java.util.concurrent.Callable;
++
++/**
++ * The policy engine behind {@code UhfService}: session exclusivity, the antenna-check interlock,
++ * the RF power ceiling, region persistence, and the mutual-exclusion rules between streaming and
++ * everything else. Every one of those is a requirement in UHF-SRS-001 with a documented hardware
++ * or regulatory reason (FR-LC-03/04/05/09, FR-ANT-02, FR-PWR-03, FR-STR-08/13, FR-BUF-07,
++ * NFR-C-01) — this class is where they are actually enforced, deliberately kept independent of
++ * Binder, permissions, and AIDL so it can be unit tested without a framework build (see
++ * {@code UhfSessionArbiterTest}).
++ *
++ * <p>"Client" is an opaque {@code Object} token here rather than an {@code IBinder}; the real
++ * {@code UhfService} passes the caller's actual {@code IBinder} session token and wires
++ * {@link #onClientDied} to an {@code IBinder.DeathRecipient} callback. Nothing in this class
++ * depends on that being a real Binder object, which is exactly what makes it testable with a
++ * plain {@code new Object()} standing in for a client process.
++ *
++ * <p>All public methods are synchronized: NFR-C-01 requires every reader transaction to be
++ * serialized onto one logical thread, and the simplest way to guarantee that from the policy
++ * layer is to hold the arbiter's own lock for the duration of each operation, including the
++ * transport call it makes. A slow transport therefore serializes callers too, by design — that is
++ * the "reader accepts one command per cycle" constraint made visible instead of hidden behind a
++ * queue that could reorder things.
++ */
++public final class UhfSessionArbiter {
++
++    // Command bytes this class issues directly. Frame building/parsing is UhfProtocol's job; this
++    // class only decides *which* commands to send and in *what order* — the policy, not the wire
++    // format.
++    private static final int CMD_REALTIME_MODE = 0x76;
++    private static final int CMD_ANTENNA_MASK = 0x3F;
++    private static final int CMD_ANTENNA_CHECK = 0x66;
++    private static final int CMD_RF_POWER = 0x2F;
++    private static final int CMD_REGION = 0x22;
++    private static final int CMD_BUFFERED_START = 0x18; // FR-BUF-01, status Confirm pending OI-01
++    private static final int CMD_BUFFERED_STOP = 0x1A;  // FR-BUF-04, status Confirm pending OI-01
++
++    private static final int DEFAULT_TIMEOUT_MS = 500;
++
++    /** FR-PWR-03: default safe ceiling; exceeding it requires the caller's explicit override. */
++    public static final int DEFAULT_SAFE_POWER_CEILING = 20;
++
++    private enum ReaderMode { IDLE, STREAMING, BUFFERED }
++
++    /** Persisted region state, independent of reader readback — see FR-LC-09. */
++    public interface RegionStore {
++        int getPersistedRegionCode();
++        void setPersistedRegionCode(int bandCode);
++    }
++
++    private final UhfTransport transport;
++    private final RegionStore regionStore;
++    private final EventLog eventLog;
++
++    /** Structured audit sink for the log-worthy events (FR-FRQ-04, FR-SEC-07). */
++    public interface EventLog {
++        void onRegionChanged(Object clientToken, int newBandCode);
++    }
++
++    private Object holder; // null = no session held
++    private ReaderMode mode = ReaderMode.IDLE;
++    private int antennaMask;
++    private int rfPower;
++    private boolean antennaCheckEnabled;
++    private int safePowerCeiling = DEFAULT_SAFE_POWER_CEILING;
++    private int maxRfPowerFromReader = 30; // FR-PWR-02 ceiling; refreshed by identify() in practice
++    private StreamRequest lastStreamRequest; // for FR-STR-13's auto-restart
++
++    /** Minimal description of an active stream, enough to restart it after a forced stop. */
++    public static final class StreamRequest {
++        public final int qValue;
++        public final int session;
++
++        public StreamRequest(int qValue, int session) {
++            this.qValue = qValue;
++            this.session = session;
++        }
++    }
++
++    public UhfSessionArbiter(UhfTransport transport, RegionStore regionStore, EventLog eventLog) {
++        this.transport = transport;
++        this.regionStore = regionStore;
++        this.eventLog = eventLog;
++    }
++
++    /**
++     * FR-LC-05 and FR-LC-09, run once at construction time (i.e. at service start / after any HAL
++     * restart): force the reader out of real-time mode regardless of what it booted into, and
++     * re-apply the persisted region rather than trusting whatever the reader currently reports.
++     * Must be called before the first {@link #openSession} succeeds.
++     */
++    public synchronized void performStartupReset() throws UhfTransportException {
++        transport.open();
++        // FR-LC-05: unconditional — do not check current mode first, because a device that was
++        // streaming when powered off answers this exact query with more streamed tag frames, not
++        // a clean answer. Force the transition every time.
++        transport.transact(CMD_REALTIME_MODE, new byte[] {0x00}, DEFAULT_TIMEOUT_MS);
++        mode = ReaderMode.IDLE;
++
++        // FR-LC-09: region is reasserted from platform storage, not read back and trusted. If the
++        // HAL just restarted after a crash mid-session, the reader's own idea of its region might
++        // still be correct — or might not be, and there is no way to tell the difference from here
++        // without an unlogged guess. Always write it.
++        int persisted = regionStore.getPersistedRegionCode();
++        transport.transact(CMD_REGION, new byte[] {(byte) persisted}, DEFAULT_TIMEOUT_MS);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-LC-03/04: exclusive sessions
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized void openSession(Object clientToken) throws UhfBusyException {
++        if (clientToken == null) {
++            throw new NullPointerException("clientToken");
++        }
++        if (holder != null) {
++            throw new UhfBusyException();
++        }
++        holder = clientToken;
++    }
++
++    /** Graceful close, called by the client itself. */
++    public synchronized void closeSession(Object clientToken) {
++        requireHolder(clientToken);
++        releaseInternal();
++    }
++
++    /**
++     * FR-LC-04: the involuntary path, driven by the client process's Binder death. Unlike
++     * {@link #closeSession} this must never throw — a dying client is exactly the moment nothing
++     * can be assumed about its future behaviour, and a policy that throws here would leave the
++     * arbiter permanently wedged with a holder that will never call {@code closeSession}.
++     */
++    public synchronized void onClientDied(Object clientToken) {
++        if (holder == clientToken) {
++            releaseInternal();
++        }
++    }
++
++    private void releaseInternal() {
++        if (mode != ReaderMode.IDLE) {
++            stopActiveModeBestEffort();
++        }
++        holder = null;
++        lastStreamRequest = null;
++        activeStreamCallback = null;
++        streamSuspendedForBuffered = false;
++        suspendedStreamRequest = null;
++        suspendedStreamCallback = null;
++    }
++
++    private void stopActiveModeBestEffort() {
++        try {
++            if (mode == ReaderMode.STREAMING) {
++                transport.stopStream();
++            } else if (mode == ReaderMode.BUFFERED) {
++                transport.transact(CMD_BUFFERED_STOP, new byte[0], DEFAULT_TIMEOUT_MS);
++            }
++        } catch (UhfTransportException e) {
++            // Best-effort: releasing a session (especially on client death) must not throw. The
++            // reader may be left in a stale mode; performStartupReset() on the next boot/restart
++            // is the backstop, and a live service would log this rather than swallow it silently.
++        } finally {
++            mode = ReaderMode.IDLE;
++        }
++    }
++
++    public synchronized boolean isHeldBy(Object clientToken) {
++        return holder == clientToken;
++    }
++
++    public synchronized boolean isSessionOpen() {
++        return holder != null;
++    }
++
++    private void requireHolder(Object clientToken) {
++        if (holder != clientToken) {
++            throw new IllegalStateException("caller does not hold the session");
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-ANT-01/02: antenna mask, with the undocumented check-off/write/check-on interlock
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized void setEnabledAntennas(Object clientToken, int mask)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        runExclusiveOfActiveMode(() -> {
++            boolean checkWasOn = antennaCheckEnabled;
++            // FR-ANT-02: 0x3F is rejected with 0xF9 while the check is on. Order matters and is
++            // not optional: off, write, back on — never write with the check still enabled.
++            if (checkWasOn) {
++                transport.transact(CMD_ANTENNA_CHECK, new byte[] {0x00}, DEFAULT_TIMEOUT_MS);
++            }
++            transport.transact(CMD_ANTENNA_MASK, new byte[] {(byte) mask}, DEFAULT_TIMEOUT_MS);
++            if (checkWasOn) {
++                transport.transact(CMD_ANTENNA_CHECK, new byte[] {0x01}, DEFAULT_TIMEOUT_MS);
++            }
++            antennaMask = mask;
++            return null;
++        });
++    }
++
++    public synchronized int getEnabledAntennas(Object clientToken) {
++        requireHolder(clientToken);
++        return antennaMask;
++    }
++
++    public synchronized void setAntennaCheckEnabled(Object clientToken, boolean enabled)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        transport.transact(CMD_ANTENNA_CHECK, new byte[] {(byte) (enabled ? 1 : 0)},
++                DEFAULT_TIMEOUT_MS);
++        antennaCheckEnabled = enabled;
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-PWR-01..03: RF power with the enforced safe ceiling
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized void setRfPower(Object clientToken, int power, boolean allowAboveSafeCeiling)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        if (power < 0 || power > maxRfPowerFromReader) {
++            // FR-PWR-02: reject before it ever reaches the reader.
++            throw new IllegalArgumentException(
++                    "power " + power + " outside [0," + maxRfPowerFromReader + "]");
++        }
++        if (power > safePowerCeiling && !allowAboveSafeCeiling) {
++            // FR-PWR-03: the brownout-at-30/30 failure mode presents as "reader works, sees no
++            // tags" with no error anywhere — this exception is the only place that failure mode
++            // is prevented rather than merely documented.
++            throw new UhfSafetyCeilingExceededException(safePowerCeiling, power);
++        }
++        transport.transact(CMD_RF_POWER, new byte[] {(byte) power}, DEFAULT_TIMEOUT_MS);
++        rfPower = power;
++    }
++
++    public synchronized int getRfPower(Object clientToken) {
++        requireHolder(clientToken);
++        return rfPower;
++    }
++
++    public synchronized void setSafePowerCeiling(int ceiling) {
++        this.safePowerCeiling = ceiling;
++    }
++
++    public synchronized int getSafePowerCeiling() {
++        return safePowerCeiling;
++    }
++
++    void setMaxRfPowerFromReaderForTest(int max) { // test-only seam; identify() sets this in prod
++        this.maxRfPowerFromReader = max;
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-FRQ-04 / FR-LC-09: region, persisted independent of the general restore mechanism
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized void setRegion(Object clientToken, int bandCode)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        transport.transact(CMD_REGION, new byte[] {(byte) bandCode}, DEFAULT_TIMEOUT_MS);
++        regionStore.setPersistedRegionCode(bandCode);
++        eventLog.onRegionChanged(clientToken, bandCode); // FR-FRQ-04: every deliberate change logged
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-STR-01/07/08/13, FR-BUF-01/04/07: streaming and buffered inventory, mutually exclusive
++    // with each other and with everything else, per NFR-C-01 (one command per cycle).
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized void startStreaming(Object clientToken, StreamRequest request,
++            UhfTransport.StreamCallback callback) throws UhfTransportException {
++        requireHolder(clientToken);
++        if (mode != ReaderMode.IDLE) {
++            throw new IllegalStateException("reader is already " + mode + "; stop it first");
++        }
++        transport.startStream(callback);
++        mode = ReaderMode.STREAMING;
++        lastStreamRequest = request;
++        activeStreamCallback = callback;
++    }
++
++    /** Explicit stop by the caller: FR-STR-13's auto-restart does not apply afterward. */
++    public synchronized void stopStreaming(Object clientToken) {
++        requireHolder(clientToken);
++        if (mode == ReaderMode.STREAMING) {
++            transport.stopStream();
++            mode = ReaderMode.IDLE;
++        }
++        lastStreamRequest = null; // an explicit stop cancels any pending auto-restart intent
++    }
++
++    public synchronized boolean isStreaming(Object clientToken) {
++        requireHolder(clientToken);
++        return mode == ReaderMode.STREAMING;
++    }
++
++    // Bookkeeping for the buffered-inventory span specifically: unlike the momentary suspension
++    // in runExclusiveOfActiveMode (stop, do one thing, restart immediately), a stream interrupted
++    // by FR-BUF-07 must stay stopped for the *entire* buffered session and only come back when
++    // the caller ends it with stopBufferedInventory — potentially many calls later.
++    private boolean streamSuspendedForBuffered;
++    private StreamRequest suspendedStreamRequest;
++    private UhfTransport.StreamCallback suspendedStreamCallback;
++
++    public synchronized void startBufferedInventory(Object clientToken)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        if (mode == ReaderMode.STREAMING) {
++            transport.stopStream();
++            streamSuspendedForBuffered = true;
++            suspendedStreamRequest = lastStreamRequest;
++            suspendedStreamCallback = activeStreamCallback;
++        }
++        transport.transact(CMD_BUFFERED_START, new byte[0], DEFAULT_TIMEOUT_MS);
++        mode = ReaderMode.BUFFERED;
++    }
++
++    public synchronized void stopBufferedInventory(Object clientToken)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        if (mode != ReaderMode.BUFFERED) {
++            return;
++        }
++        transport.transact(CMD_BUFFERED_STOP, new byte[0], DEFAULT_TIMEOUT_MS);
++        mode = ReaderMode.IDLE;
++        if (streamSuspendedForBuffered) {
++            streamSuspendedForBuffered = false;
++            transport.startStream(suspendedStreamCallback);
++            mode = ReaderMode.STREAMING;
++            lastStreamRequest = suspendedStreamRequest;
++            activeStreamCallback = suspendedStreamCallback;
++        }
++    }
++
++    /**
++     * FR-STR-13: runs {@code op} with any active stream stopped first, and restarts it
++     * immediately afterward with its original parameters if — and only if — the caller had not
++     * explicitly stopped it. This is for momentary operations (a configuration write, a tag
++     * memory access) that complete within this one call; buffered inventory's suspension spans
++     * multiple calls and is handled by {@link #startBufferedInventory}/{@link
++     * #stopBufferedInventory} directly instead of through here.
++     */
++    private <T> T runExclusiveOfActiveMode(Callable<T> op) throws UhfTransportException {
++        boolean wasStreaming = (mode == ReaderMode.STREAMING);
++        StreamRequest saved = lastStreamRequest;
++        UhfTransport.StreamCallback savedCallback = wasStreaming ? activeStreamCallback : null;
++        if (wasStreaming) {
++            transport.stopStream();
++            mode = ReaderMode.IDLE;
++        }
++        boolean restarted = false;
++        try {
++            T result = op.call();
++            return result;
++        } catch (UhfTransportException e) {
++            throw e;
++        } catch (Exception e) {
++            throw new IllegalStateException(e);
++        } finally {
++            if (wasStreaming && mode == ReaderMode.IDLE) {
++                try {
++                    transport.startStream(savedCallback);
++                    mode = ReaderMode.STREAMING;
++                    lastStreamRequest = saved;
++                    restarted = true;
++                } catch (UhfTransportException e) {
++                    // The original op's own exception (if any) already propagated; a failed
++                    // auto-restart surfaces as the stream simply being stopped, which is
++                    // observable via isStreaming() and is a service responsibility to surface
++                    // as onStreamError, not this method's to hide behind a swallowed exception.
++                }
++            }
++        }
++    }
++
++    // Tracked so runExclusiveOfActiveMode can restart with the same sink. Set by startStreaming.
++    private UhfTransport.StreamCallback activeStreamCallback;
++
++    // ---------------------------------------------------------------------------------------
++    // Exceptions
++    // ---------------------------------------------------------------------------------------
++
++    /** FR-LC-03: another client already holds the session (API error {@code ERROR_BUSY}). */
++    public static final class UhfBusyException extends Exception {}
++
++    /** FR-PWR-03: the requested power exceeds the safe ceiling without an explicit override. */
++    public static final class UhfSafetyCeilingExceededException extends RuntimeException {
++        public final int ceiling;
++        public final int requested;
++
++        UhfSafetyCeilingExceededException(int ceiling, int requested) {
++            super("requested power " + requested + " exceeds safe ceiling " + ceiling
++                    + "; pass allowAboveSafeCeiling=true to override");
++            this.ceiling = ceiling;
++            this.requested = requested;
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfTransport.java b/services/core/java/com/android/server/uhf/UhfTransport.java
+new file mode 100644
+index 00000000..3fab2a27
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfTransport.java
+@@ -0,0 +1,70 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++/**
++ * Abstraction over the physical link to the reader, so that {@link UhfSessionArbiter} — the class
++ * that actually encodes the platform's policy (exclusivity, the antenna-check interlock, the
++ * power ceiling, streaming's mutual exclusion with everything else) — can be unit tested on the
++ * host with a fake, without a reader, a tty, or even a JNI layer.
++ *
++ * <p>Per UHF-SRS-001 &sect;3.2's "phased alternative", this is implemented in Phase 1 by
++ * {@code UhfSerialTransport}, a thin JNI shim opened directly from {@code system_server} against
++ * {@code /dev/ttyUSB*}. In Phase 2 the same interface is satisfied instead by a Binder proxy to
++ * the vendor HAL (AIDL {@code vendor.rockchip.hardware.uhf.IUhfReader}), and
++ * {@link UhfSessionArbiter} does not change at all — this boundary is exactly where &sect;3.2 says
++ * the HAL split happens.
++ */
++public interface UhfTransport {
++
++    /** Opens the link. Idempotent: calling it while already open is a no-op. */
++    void open() throws UhfTransportException;
++
++    /** Closes the link. Idempotent: calling it while already closed is a no-op. */
++    void close();
++
++    boolean isOpen();
++
++    /**
++     * Sends one framed command and returns its payload once a reply whose {@code reCmd} matches
++     * {@code command} has been received (UhfProtocol#reCmdMatches), or throws on timeout or a
++     * reader-reported error status. Multi-frame replies (status 0x03) are assembled internally;
++     * callers see one concatenated result.
++     */
++    byte[] transact(int command, byte[] payload, int timeoutMs) throws UhfTransportException;
++
++    /**
++     * Enters real-time streaming mode (cmd 0x76) and delivers batches to {@code callback} until
++     * {@link #stopStream} is called. Returns once the mode-entry command is acknowledged; delivery
++     * happens asynchronously on an implementation-owned thread.
++     */
++    void startStream(StreamCallback callback) throws UhfTransportException;
++
++    /**
++     * Leaves real-time mode. Per FR-STR-07, a correct implementation retries the stop frame and
++     * confirms the port has gone quiet before returning; this interface only promises that once
++     * this call returns, no further {@link StreamCallback} invocation for this stream instance
++     * will occur.
++     */
++    void stopStream();
++
++    /** Delivery sink for {@link #startStream}. */
++    interface StreamCallback {
++        void onTagBatch(byte[][] rawTagRecords);
++        void onError(int transportErrorCode);
++    }
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfTransportException.java b/services/core/java/com/android/server/uhf/UhfTransportException.java
+new file mode 100644
+index 00000000..dcfd35cb
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfTransportException.java
+@@ -0,0 +1,36 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++/**
++ * Thrown by {@link UhfTransport} for link-level failures: timeout, device-lost, or a reader status
++ * byte that {@link UhfProtocol#mapStatusToError} maps to something other than
++ * {@link UhfProtocol#ERROR_NONE}. Carries the mapped stable error code so callers up the stack
++ * (ultimately {@code UhfException} at the API boundary) don't need to know wire-protocol details.
++ */
++public class UhfTransportException extends Exception {
++    private final int errorCode;
++
++    public UhfTransportException(int errorCode, String message) {
++        super(message);
++        this.errorCode = errorCode;
++    }
++
++    public int getErrorCode() {
++        return errorCode;
++    }
++}
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java
+new file mode 100644
+index 00000000..1fa61951
+--- /dev/null
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java
+@@ -0,0 +1,711 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import com.android.server.uhf.UhfProtocol.BandPlan;
++import com.android.server.uhf.UhfProtocol.Frame;
++import com.android.server.uhf.UhfProtocol.ReaderInfo;
++import com.android.server.uhf.UhfProtocol.ScanOutcome;
++import com.android.server.uhf.UhfProtocol.ScanResult;
++import com.android.server.uhf.UhfProtocol.TagRecord;
++
++import org.junit.Test;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Random;
++
++/**
++ * Host-side, no-hardware unit tests for {@link UhfProtocol}. This file implements UHF-SRS-001
++ * &sect;9.1 TST-U-01 through TST-U-08 directly (each test method says which one it is), plus
++ * additional edge cases the SRS's own "measured, a mistake worth not repeating" notes call out as
++ * traps: the reCmd-vs-CRC distinction (FR-LNK-06), the Version-is-two-bytes offset bug
++ * (FR-INF-02), and the requirement that a random byte stream never throws (NFR-R-05).
++ *
++ * <p>No real captured frames from R3 exist yet (SRS &sect;1.4: R1/R3 were not on disk when this
++ * was written). Fixtures below are synthetic but protocol-correct: built with
++ * {@link UhfProtocol#buildFrame} and hand-verified band/version math, so a wrong CRC assumption
++ * or a wrong offset shows up as a test failure against the *specification*, even before a real
++ * capture is available to test against the *hardware*. TST-U-02 and TST-U-03 as literally written
++ * in the SRS ("byte-for-byte match against captured command bytes") cannot be satisfied without
++ * R3; the versions here assert everything that is checkable without it and are marked so no one
++ * mistakes a passing synthetic-fixture test for hardware verification.
++ */
++public class UhfProtocolTest {
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-01: CRC16 over every captured frame in R3 — result is 0 for each complete frame.
++    // R3 isn't available; this instead proves the CRC round-trips through build+validate for a
++    // wide sweep of address/command/payload combinations, including the boundary cases that would
++    // expose an off-by-one in which bytes get included in the check.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void crc16_isZeroOverFrameIncludingItsOwnCrcBytes() {
++        int[] addresses = {0x00, 0x01, 0x7F, UhfProtocol.ADDRESS_BROADCAST};
++        int[] commands = {0x00, 0x01, 0x21, 0x76, 0xFF};
++        int[] payloadLens = {0, 1, 2, 17, 64, 250}; // 250 keeps total frame <= 255 (Len is 1 byte)
++
++        for (int addr : addresses) {
++            for (int cmd : commands) {
++                for (int payloadLen : payloadLens) {
++                    byte[] payload = new byte[payloadLen];
++                    new Random(addr * 31 + cmd * 17 + payloadLen).nextBytes(payload);
++                    byte[] frame = UhfProtocol.buildFrame(addr, cmd, payload);
++                    assertTrue("addr=" + addr + " cmd=" + cmd + " payloadLen=" + payloadLen,
++                            UhfProtocol.isCrcValid(frame, 0, frame.length));
++                    assertEquals(0, UhfProtocol.crc16(frame, 0, frame.length));
++                }
++            }
++        }
++    }
++
++    @Test
++    public void crc16_flippingAnyByteInvalidatesTheFrame() {
++        byte[] frame = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {1, 2, 3, 4, 5});
++        for (int i = 0; i < frame.length; i++) {
++            byte[] corrupted = frame.clone();
++            corrupted[i] = (byte) (corrupted[i] ^ 0xFF);
++            assertFalse("corrupting byte " + i + " must invalidate CRC",
++                    UhfProtocol.isCrcValid(corrupted, 0, corrupted.length));
++        }
++    }
++
++    @Test
++    public void crc16_isDeterministicAndOrderSensitive() {
++        byte[] a = {0x05, (byte) 0xFF, 0x21, 0x01, 0x02};
++        byte[] b = {0x05, (byte) 0xFF, 0x21, 0x02, 0x01}; // same bytes, different order
++        assertEquals(UhfProtocol.crc16(a, 0, a.length), UhfProtocol.crc16(a, 0, a.length));
++        assertTrue(UhfProtocol.crc16(a, 0, a.length) != UhfProtocol.crc16(b, 0, b.length));
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-02: frame builder against captured command bytes — byte-for-byte match including
++    // CRC order. No R3 capture available; this instead pins the *structure* byte-for-byte
++    // against the SRS's own frame definition, which is the part not gated on hardware access.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void buildFrame_structureMatchesSpecifiedLayout() {
++        byte[] payload = {0x11, 0x22, 0x33};
++        byte[] frame = UhfProtocol.buildFrame(0xFF, 0x21, payload);
++
++        // Len | Adr | Cmd | Data[] | CRC16-LSB | CRC16-MSB
++        assertEquals("Len = Adr+Cmd+Data+CRC(2)", 2 + payload.length + 2, frame[0] & 0xFF);
++        assertEquals(0xFF, frame[1] & 0xFF); // Adr
++        assertEquals(0x21, frame[2] & 0xFF); // Cmd
++        assertArrayEquals(payload, Arrays.copyOfRange(frame, 3, 3 + payload.length));
++        assertEquals("total wire length is Len+1", (frame[0] & 0xFF) + 1, frame.length);
++
++        int crc = UhfProtocol.crc16(frame, 0, frame.length - 2);
++        assertEquals("CRC16-LSB first", crc & 0xFF, frame[frame.length - 2] & 0xFF);
++        assertEquals("CRC16-MSB second", (crc >>> 8) & 0xFF, frame[frame.length - 1] & 0xFF);
++    }
++
++    @Test
++    public void buildFrame_emptyPayloadProducesMinimumLenField() {
++        byte[] frame = UhfProtocol.buildFrame(0x01, 0x76, new byte[0]);
++        assertEquals(UhfProtocol.MIN_LEN_FIELD, frame[0] & 0xFF);
++    }
++
++    @Test
++    public void buildFrame_rejectsPayloadThatWouldOverflowTheLenByte() {
++        // Len must fit one byte (max 0xFF); Adr+Cmd+CRC already cost 4, so payload > 251 overflows.
++        byte[] tooLong = new byte[UhfProtocol.MAX_LEN_FIELD - 4 + 1];
++        try {
++            UhfProtocol.buildFrame(0xFF, 0x01, tooLong);
++            fail("expected rejection of an over-length payload");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-03: 0x21 decode of the captured 18-byte response — passes when it yields v1.24, EU
++    // band, 865.1-867.9 MHz, power 30, ports 1+2. No captured 18-byte payload is available (R3),
++    // so this builds a synthetic payload whose fields are chosen to reproduce exactly those
++    // documented values, and additionally proves FR-INF-02 (Version is 2 bytes, not 1) by showing
++    // a naive 1-byte-Version decode produces a *different, still-plausible* wrong answer — which
++    // is exactly the failure mode the SRS warns is easy to miss.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void decodeReaderInfo_matchesDocumentedExampleValues() {
++        // FR-INF-03: bandCode = (dmaxfre>>6)<<2 | (dminfre>>6). EU band code is 0b0100 = 4.
++        // Any dmaxfre/dminfre pair whose top two bits are 0b01 (dmaxfre) and 0b00 (dminfre)
++        // reproduces it; the actual MHz value is a separate reader field this decode does not
++        // derive (that's §4.4's job, exercised by bandPlan tests below).
++        int dmaxfre = 0b01_000000; // top 2 bits -> band nibble high half = 01
++        int dminfre = 0b00_000000; // top 2 bits -> band nibble low half  = 00
++        byte[] payload = {
++            1, 24,              // Version: major=1, minor=24  -> "1.24"
++            0x07,               // model type (arbitrary, not asserted below)
++            0x01,               // protocol support: bit0 set -> 6C supported, 6B not
++            (byte) dmaxfre,
++            (byte) dminfre,
++            30,                 // Power
++            10,                 // ScanTime (10 * 100ms = 1000ms; not asserted here)
++            0b0011,             // antenna mask: ports 1+2 enabled
++            0x01,               // antenna check enabled
++        };
++
++        ReaderInfo info = UhfProtocol.decodeReaderInfo(payload);
++
++        assertEquals("1.24", info.firmwareVersionString());
++        assertEquals(0b0100, info.bandCode);
++        assertEquals(30, info.maxRfPower);
++        assertEquals(0b0011, info.antennaMask);
++        assertTrue(info.supportsIso18000_6c);
++        assertFalse(info.supportsIso18000_6b);
++        assertTrue(info.antennaCheckEnabled);
++
++        BandPlan eu = UhfProtocol.bandPlanForCode(info.bandCode);
++        assertEquals("EU", eu.name);
++        assertEquals(865.1, eu.centerFrequencyMhz(0), 1e-9);
++        assertEquals(867.9, eu.centerFrequencyMhz(14), 1e-9); // 865.1 + 14*0.2 = 867.9
++    }
++
++    @Test
++    public void decodeReaderInfo_versionMustBeTwoBytesNotOne() {
++        // This is FR-INF-02's regression test by construction: treating Version as one byte
++        // shifts every subsequent field left by one position. We build a payload correct under
++        // the two-byte reading and show that mis-decoding it as one-byte-Version yields a
++        // *different* band code — i.e. the bug is silent, not a crash, exactly as the SRS warns.
++        byte[] payload = {
++            1, 24, 0x07, 0x01,
++            (byte) 0b01_000000, (byte) 0b00_000000, // dmaxfre/dminfre -> EU (0b0100) when correct
++            30, 10, 0b0011, 0x01,
++        };
++        ReaderInfo correct = UhfProtocol.decodeReaderInfo(payload);
++        assertEquals(0b0100, correct.bandCode); // EU, as intended
++
++        // Simulate the one-byte-Version bug: everything shifts left by one, so "dmaxfre" is read
++        // from where "dminfre" actually is, etc. This must NOT equal the correct band code.
++        byte[] shiftedAsIfOneByteVersion = Arrays.copyOfRange(payload, 1, payload.length);
++        // Pad back to the minimum decodable length so the decode doesn't fail on length alone —
++        // the point is that it succeeds and is wrong, not that it throws.
++        byte[] padded = Arrays.copyOf(shiftedAsIfOneByteVersion, 10);
++        ReaderInfo buggy = UhfProtocol.decodeReaderInfo(padded);
++        assertTrue("a 1-byte-Version bug must not coincidentally decode the same band",
++                buggy.bandCode != correct.bandCode);
++    }
++
++    @Test
++    public void decodeReaderInfo_rejectsTruncatedPayloadInsteadOfGuessing() {
++        try {
++            UhfProtocol.decodeReaderInfo(new byte[] {1, 24, 0x07}); // way too short
++            fail("expected rejection of a truncated 0x21 payload");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void decodeReaderInfo_rejectsNullPayload() {
++        try {
++            UhfProtocol.decodeReaderInfo(null);
++            fail("expected rejection of a null payload");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-04: multi-frame inventory assembly with status 0x03 — all seven tags returned, none
++    // dropped.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void assembleAndDecodeInventory_sevenTagsAcrossThreeFrames_noneDropped() {
++        List<TagRecord> want = new ArrayList<>();
++        List<byte[]> tagBlobs = new ArrayList<>();
++        for (int i = 0; i < 7; i++) {
++            byte[] epc = {(byte) 0xE2, (byte) i, 0x00, 0x01};
++            int rssi = 100 + i;
++            tagBlobs.add(encodeOneTagNoTidNoPhase(epc, rssi));
++        }
++        // Split the seven encoded tags across three frames arbitrarily: 3 + 2 + 2.
++        List<Frame> chain = Arrays.asList(
++                statusFrame(UhfProtocol.STATUS_MORE_FRAMES_FOLLOW, concat(tagBlobs.subList(0, 3))),
++                statusFrame(UhfProtocol.STATUS_MORE_FRAMES_FOLLOW, concat(tagBlobs.subList(3, 5))),
++                statusFrame(UhfProtocol.STATUS_INVENTORY_COMPLETE, concat(tagBlobs.subList(5, 7))));
++
++        List<TagRecord> got = UhfProtocol.assembleAndDecodeInventory(chain);
++
++        assertEquals(7, got.size());
++        for (int i = 0; i < 7; i++) {
++            assertArrayEquals("tag " + i, new byte[] {(byte) 0xE2, (byte) i, 0x00, 0x01},
++                    got.get(i).epc);
++            assertEquals("tag " + i, 100 + i, got.get(i).rssi);
++        }
++    }
++
++    @Test
++    public void assembleAndDecodeInventory_singleFrameNoContinuation() {
++        byte[] blob = encodeOneTagNoTidNoPhase(new byte[] {1, 2, 3, 4}, 77);
++        List<Frame> chain = Arrays.asList(statusFrame(UhfProtocol.STATUS_INVENTORY_COMPLETE, blob));
++        List<TagRecord> got = UhfProtocol.assembleAndDecodeInventory(chain);
++        assertEquals(1, got.size());
++        assertEquals(77, got.get(0).rssi);
++    }
++
++    @Test
++    public void assembleAndDecodeInventory_rejectsChainWhereNonLastFrameLacksContinuationStatus() {
++        List<Frame> chain = Arrays.asList(
++                statusFrame(UhfProtocol.STATUS_INVENTORY_COMPLETE, new byte[0]), // wrong: not last
++                statusFrame(UhfProtocol.STATUS_INVENTORY_COMPLETE, new byte[0]));
++        try {
++            UhfProtocol.assembleAndDecodeInventory(chain);
++            fail("expected rejection: only the last frame may end the 0x03 chain");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void assembleAndDecodeInventory_rejectsIncompleteChainStillMarkedContinuing() {
++        List<Frame> chain = Arrays.asList(
++                statusFrame(UhfProtocol.STATUS_MORE_FRAMES_FOLLOW, new byte[0]));
++        try {
++            UhfProtocol.assembleAndDecodeInventory(chain);
++            fail("expected rejection: caller handed over a chain that isn't actually complete");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void assembleAndDecodeInventory_rejectsEmptyChain() {
++        try {
++            UhfProtocol.assembleAndDecodeInventory(new ArrayList<Frame>());
++            fail("expected rejection of an empty chain");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void decodeTagRecords_decodesEpcPlusTidWhenFlagSet() {
++        byte[] epc = {1, 2, 3, 4};
++        byte[] tid = {9, 8};
++        byte[] record = new byte[1 + epc.length + 1 + tid.length + 1];
++        int p = 0;
++        record[p++] = (byte) (0x80 | (epc.length / 2)); // bit7 set: EPC+TID present
++        System.arraycopy(epc, 0, record, p, epc.length);
++        p += epc.length;
++        record[p++] = (byte) (tid.length / 2);
++        System.arraycopy(tid, 0, record, p, tid.length);
++        p += tid.length;
++        record[p] = (byte) 55; // rssi
++
++        List<TagRecord> got = UhfProtocol.decodeTagRecords(record);
++        assertEquals(1, got.size());
++        assertArrayEquals(epc, got.get(0).epc);
++        assertArrayEquals(tid, got.get(0).tid);
++        assertEquals(55, got.get(0).rssi);
++    }
++
++    @Test
++    public void decodeTagRecords_zeroLengthEpcIsNotAnInfiniteLoopOrCrash() {
++        // Length byte says "0 EPC words", no TID/phase flags, just an RSSI byte after.
++        byte[] record = {0x00, (byte) 33};
++        List<TagRecord> got = UhfProtocol.decodeTagRecords(record);
++        assertEquals(1, got.size());
++        assertEquals(0, got.get(0).epc.length);
++        assertEquals(33, got.get(0).rssi);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-05: parser fed 1 MB of random bytes — no exception, no unbounded buffer growth.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void scan_oneMegabyteOfRandomBytes_neverThrowsAndAlwaysMakesProgress() {
++        Random rnd = new Random(42);
++        byte[] buf = new byte[1024 * 1024];
++        rnd.nextBytes(buf);
++
++        int offset = 0;
++        int iterations = 0;
++        int maxIterations = buf.length + 10; // generous: each iteration consumes >=1 byte
++        while (offset < buf.length) {
++            iterations++;
++            if (iterations > maxIterations) {
++                fail("scan() made no progress — possible infinite loop over random input");
++            }
++            ScanResult r = UhfProtocol.scan(buf, offset, buf.length - offset);
++            switch (r.outcome) {
++                case FRAME:
++                    assertTrue(r.frame.wireLength >= 1 + UhfProtocol.MIN_LEN_FIELD);
++                    offset += r.frame.wireLength;
++                    break;
++                case RESYNC:
++                    assertTrue("resync must discard at least one byte", r.bytesToDiscard >= 1);
++                    offset += r.bytesToDiscard;
++                    break;
++                case NEED_MORE_DATA:
++                    offset = buf.length; // end of available input; stop
++                    break;
++            }
++        }
++        // Reaching here without throwing and without exceeding maxIterations is the assertion.
++    }
++
++    @Test
++    public void scan_allZeroBuffer_resyncsByteByByteWithoutHanging() {
++        byte[] buf = new byte[500]; // all zero; 0x00 < MIN_LEN_FIELD everywhere
++        int offset = 0;
++        int discardedTotal = 0;
++        while (offset < buf.length) {
++            ScanResult r = UhfProtocol.scan(buf, offset, buf.length - offset);
++            assertEquals(ScanOutcome.RESYNC, r.outcome);
++            assertEquals(1, r.bytesToDiscard);
++            offset += r.bytesToDiscard;
++            discardedTotal += r.bytesToDiscard;
++        }
++        assertEquals(buf.length, discardedTotal);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-06: resync past leading bytes below 4 — next valid frame is recovered.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void scan_recoversValidFrameAfterGarbageBelowMinLen() {
++        byte[] garbage = {0x00, 0x01, 0x02, 0x03}; // all < MIN_LEN_FIELD (4)
++        byte[] validFrame = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {9, 9});
++        byte[] buf = concatArrays(garbage, validFrame);
++
++        int offset = 0;
++        int resyncCount = 0;
++        ScanResult r;
++        do {
++            r = UhfProtocol.scan(buf, offset, buf.length - offset);
++            if (r.outcome == ScanOutcome.RESYNC) {
++                resyncCount++;
++                offset += r.bytesToDiscard;
++            }
++        } while (r.outcome == ScanOutcome.RESYNC);
++
++        assertEquals(garbage.length, resyncCount);
++        assertEquals(ScanOutcome.FRAME, r.outcome);
++        assertEquals(0x21, r.frame.command);
++        assertArrayEquals(new byte[] {9, 9}, r.frame.data);
++    }
++
++    @Test
++    public void scan_recoversAfterCrcCorruptedFrameFollowedByGoodOne() {
++        byte[] corrupted = UhfProtocol.buildFrame(0xFF, 0x01, new byte[] {1, 2, 3});
++        corrupted[corrupted.length - 1] ^= 0x01; // wreck the CRC only
++        byte[] good = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {5});
++        byte[] buf = concatArrays(corrupted, good);
++
++        // Plain scan() must get all the way to needing more data at some point: the corrupted
++        // CRC's trailing byte can itself look like a plausible (oversized) length prefix once
++        // resync passes it, and scan() is correct to refuse to guess past that ambiguity from a
++        // single call — see scanWithStallRecovery's doc for why. This buffer is engineered to hit
++        // exactly that case, so the plain-scan half of this test is really asserting the ambiguity
++        // exists, not that it's resolved.
++        int offset = 0;
++        ScanResult r;
++        int guard = 0;
++        while (true) {
++            r = UhfProtocol.scan(buf, offset, buf.length - offset);
++            if (r.outcome != ScanOutcome.RESYNC) {
++                break;
++            }
++            offset += r.bytesToDiscard;
++            assertTrue("must not loop forever recovering from one corrupted frame", ++guard < 300);
++        }
++        assertEquals("this buffer is constructed to stall plain scan() on ambiguous length data",
++                ScanOutcome.NEED_MORE_DATA, r.outcome);
++
++        // A live connection would eventually deliver more bytes (or none, forever). A transport
++        // that has instead hit its FR-LNK-05 inter-byte timeout with no new byte arriving must
++        // resolve the stall via scanWithStallRecovery rather than blocking indefinitely.
++        guard = 0;
++        while (true) {
++            r = UhfProtocol.scanWithStallRecovery(buf, offset, buf.length - offset, true);
++            if (r.outcome != ScanOutcome.RESYNC) {
++                break;
++            }
++            offset += r.bytesToDiscard;
++            assertTrue("stall recovery must not loop forever either", ++guard < 300);
++        }
++        assertEquals(ScanOutcome.FRAME, r.outcome);
++        assertEquals(0x21, r.frame.command);
++    }
++
++    @Test
++    public void scanWithStallRecovery_doesNotDiscardWhileConnectionIsStillLive() {
++        // staleTimeoutElapsed=false must behave exactly like plain scan(): a length byte
++        // promising more data is patience, not noise, until the timeout says otherwise.
++        byte[] full = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {1, 2, 3, 4, 5});
++        byte[] truncated = Arrays.copyOf(full, full.length - 2);
++        ScanResult r = UhfProtocol.scanWithStallRecovery(truncated, 0, truncated.length, false);
++        assertEquals(ScanOutcome.NEED_MORE_DATA, r.outcome);
++    }
++
++    @Test
++    public void scanWithStallRecovery_doesNotAlterAFrameOrAnAlreadyCrcResyncOutcome() {
++        byte[] good = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {1});
++        ScanResult frameResult = UhfProtocol.scanWithStallRecovery(good, 0, good.length, true);
++        assertEquals(ScanOutcome.FRAME, frameResult.outcome);
++
++        byte[] junk = {0x00};
++        ScanResult resyncResult = UhfProtocol.scanWithStallRecovery(junk, 0, junk.length, true);
++        assertEquals(ScanOutcome.RESYNC, resyncResult.outcome);
++    }
++
++    @Test
++    public void scan_needsMoreData_whenLenFieldPromisesBytesNotYetBuffered() {
++        byte[] full = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {1, 2, 3, 4, 5});
++        byte[] truncated = Arrays.copyOf(full, full.length - 2); // hold back the last 2 bytes
++        ScanResult r = UhfProtocol.scan(truncated, 0, truncated.length);
++        assertEquals(ScanOutcome.NEED_MORE_DATA, r.outcome);
++    }
++
++    @Test
++    public void scan_emptyBufferNeedsMoreData() {
++        ScanResult r = UhfProtocol.scan(new byte[0], 0, 0);
++        assertEquals(ScanOutcome.NEED_MORE_DATA, r.outcome);
++    }
++
++    @Test
++    public void scan_singleByteBelowMinLenIsImmediateResyncNotNeedMoreData() {
++        // A length byte of e.g. 2 can *never* be valid (min is 4) regardless of how much more
++        // data arrives, so this must resync immediately rather than waiting for "more data".
++        ScanResult r = UhfProtocol.scan(new byte[] {0x02}, 0, 1);
++        assertEquals(ScanOutcome.RESYNC, r.outcome);
++        assertEquals(1, r.bytesToDiscard);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-07: reply matching while tag frames are interleaved — only the frame whose reCmd
++    // matches is accepted.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void reCmdMatches_rejectsInterleavedRealTimeTagFrameEvenThoughItsCrcIsValid() {
++        // Simulates FR-LNK-06's exact failure mode: a real-time-mode tag frame (cmd 0xEE) is a
++        // perfectly valid, CRC-correct frame that happens to arrive while we're waiting on the
++        // reply to an 0x3F (set antenna mask) command.
++        byte[] tagFrame = UhfProtocol.buildFrame(0xFF, 0xEE, new byte[] {1, 2, 3});
++        byte[] realReply = UhfProtocol.buildFrame(0xFF, 0x3F, new byte[] {0x00});
++        byte[] buf = concatArrays(tagFrame, realReply);
++
++        int sentCommand = 0x3F;
++        int offset = 0;
++        Frame accepted = null;
++        int guard = 0;
++        while (offset < buf.length && ++guard < 100) {
++            ScanResult r = UhfProtocol.scan(buf, offset, buf.length - offset);
++            if (r.outcome == ScanOutcome.FRAME) {
++                offset += r.frame.wireLength;
++                if (UhfProtocol.reCmdMatches(r.frame, sentCommand)) {
++                    accepted = r.frame;
++                    break;
++                }
++                // structurally valid but not our reply (the tag frame) — correctly skipped.
++            } else if (r.outcome == ScanOutcome.RESYNC) {
++                offset += r.bytesToDiscard;
++            } else {
++                break;
++            }
++        }
++
++        assertTrue("the real reply must eventually be accepted", accepted != null);
++        assertEquals(0x3F, accepted.command);
++        assertArrayEquals(new byte[] {0x00}, accepted.data);
++    }
++
++    @Test
++    public void reCmdMatches_falseWhenCommandDiffersEvenIfEverythingElseMatches() {
++        assertFalse(UhfProtocol.reCmdMatches(frameWithCommand(0x21), 0x22));
++        assertTrue(UhfProtocol.reCmdMatches(frameWithCommand(0x22), 0x22));
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // TST-U-08: status-to-error mapping table — matches §5.5 exactly; 0xFB yields an empty list,
++    // not a throw. ("Empty list" is the caller's job once ERROR_NONE comes back for 0xFB; this
++    // test asserts the mapping itself.)
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void mapStatusToError_matchesSection5point5ExactlyForEveryDocumentedStatus() {
++        assertEquals(UhfProtocol.ERROR_NONE, UhfProtocol.mapStatusToError(0x00));
++        assertEquals(UhfProtocol.ERROR_NONE, UhfProtocol.mapStatusToError(0x01));
++        assertEquals(UhfProtocol.ERROR_NONE, UhfProtocol.mapStatusToError(0x02)); // partial, not error
++        assertEquals(UhfProtocol.ERROR_BUFFER_FULL, UhfProtocol.mapStatusToError(0x04));
++        assertEquals(UhfProtocol.ERROR_ANTENNA_FAULT, UhfProtocol.mapStatusToError(0xF8));
++        assertEquals(UhfProtocol.ERROR_COMMAND_REJECTED, UhfProtocol.mapStatusToError(0xF9));
++        assertEquals(UhfProtocol.ERROR_NONE, UhfProtocol.mapStatusToError(0xFB)); // no throw, no error
++        assertEquals(UhfProtocol.ERROR_PROTOCOL, UhfProtocol.mapStatusToError(0xFD));
++        assertEquals(UhfProtocol.ERROR_PROTOCOL, UhfProtocol.mapStatusToError(0xFE));
++        assertEquals(UhfProtocol.ERROR_INVALID_PARAMETER, UhfProtocol.mapStatusToError(0xFF));
++    }
++
++    @Test
++    public void mapStatusToError_0xFB_isNotAnException() {
++        // The literal TST-U-08 wording: "0xFB yields an empty list, not a throw." At the mapper
++        // level that means: it must not throw, and it must not signal an error the caller would
++        // be forced to catch around an ordinary "no tags in field" outcome.
++        int error = UhfProtocol.mapStatusToError(UhfProtocol.STATUS_NO_OPERABLE_TAGS);
++        assertEquals(UhfProtocol.ERROR_NONE, error);
++    }
++
++    @Test
++    public void mapStatusToError_0x03MustNeverReachTheMapper() {
++        // 0x03 is a continuation marker consumed by frame assembly, not a terminal status. A
++        // caller that forwards it to the mapper has a bug; the mapper must say so loudly rather
++        // than inventing a plausible mapping for it.
++        try {
++            UhfProtocol.mapStatusToError(UhfProtocol.STATUS_MORE_FRAMES_FOLLOW);
++            fail("0x03 must not have a silent mapping");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void mapStatusToError_unknownStatusThrowsRatherThanGuessing() {
++        try {
++            UhfProtocol.mapStatusToError(0x37); // not in §5.5
++            fail("an unmapped status must not silently succeed");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // Additional edge cases beyond the SRS's own TST-U-* list.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void bandPlan_rejectsNOutsideDocumentedRange() {
++        BandPlan eu = UhfProtocol.bandPlanForCode(0b0100);
++        try {
++            eu.centerFrequencyMhz(15); // EU's max N is 14
++            fail("N=15 is out of range for EU (max 14)");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++        try {
++            eu.centerFrequencyMhz(-1);
++            fail("negative N must be rejected");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void bandPlan_unassignedCodeReturnsNullNotAWrongGuess() {
++        assertNull(UhfProtocol.bandPlanForCode(0b0101)); // not in the §4.4 table
++    }
++
++    @Test
++    public void buildFrame_defaultsNullPayloadToEmpty() {
++        byte[] frame = UhfProtocol.buildFrame(0xFF, 0x76, null);
++        assertEquals(UhfProtocol.MIN_LEN_FIELD, frame[0] & 0xFF);
++    }
++
++    @Test
++    public void statusByte_throwsRatherThanIndexingAnEmptyPayload() {
++        Frame f = frameWithNoData(0x21);
++        try {
++            f.statusByte();
++            fail("a frame with no data has no status byte to read");
++        } catch (IllegalStateException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void crc16_boundsCheckedAgainstBufferLength() {
++        byte[] buf = new byte[4];
++        try {
++            UhfProtocol.crc16(buf, 2, 10); // runs past the end
++            fail("expected bounds check to reject this");
++        } catch (IndexOutOfBoundsException expected) {
++            // pass
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // Test fixtures / helpers
++    // ---------------------------------------------------------------------------------------
++
++    private static Frame statusFrame(int status, byte[] tagBlob) {
++        byte[] data = new byte[1 + tagBlob.length];
++        data[0] = (byte) status;
++        System.arraycopy(tagBlob, 0, data, 1, tagBlob.length);
++        return frameFromParts(0xFF, 0x01, data);
++    }
++
++    private static byte[] encodeOneTagNoTidNoPhase(byte[] epc, int rssi) {
++        byte[] out = new byte[1 + epc.length + 1];
++        out[0] = (byte) (epc.length / 2); // no flags set, plain EPC-word-count length byte
++        System.arraycopy(epc, 0, out, 1, epc.length);
++        out[1 + epc.length] = (byte) rssi;
++        return out;
++    }
++
++    private static byte[] concat(List<byte[]> parts) {
++        int total = 0;
++        for (byte[] p : parts) total += p.length;
++        byte[] out = new byte[total];
++        int pos = 0;
++        for (byte[] p : parts) {
++            System.arraycopy(p, 0, out, pos, p.length);
++            pos += p.length;
++        }
++        return out;
++    }
++
++    private static byte[] concatArrays(byte[] a, byte[] b) {
++        byte[] out = new byte[a.length + b.length];
++        System.arraycopy(a, 0, out, 0, a.length);
++        System.arraycopy(b, 0, out, a.length, b.length);
++        return out;
++    }
++
++    /** Builds a {@link Frame} directly (bypassing the wire) for tests that only need the model. */
++    private static Frame frameFromParts(int address, int command, byte[] data) {
++        byte[] wire = UhfProtocol.buildFrame(address, command, data);
++        ScanResult r = UhfProtocol.scan(wire, 0, wire.length);
++        if (r.outcome != ScanOutcome.FRAME) {
++            throw new AssertionError("test helper built an unparseable frame");
++        }
++        return r.frame;
++    }
++
++    private static Frame frameWithCommand(int command) {
++        return frameFromParts(0xFF, command, new byte[] {0x00});
++    }
++
++    private static Frame frameWithNoData(int command) {
++        return frameFromParts(0xFF, command, new byte[0]);
++    }
++}
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+new file mode 100644
+index 00000000..62489c2b
+--- /dev/null
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+@@ -0,0 +1,525 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import com.android.server.uhf.UhfSessionArbiter.StreamRequest;
++import com.android.server.uhf.UhfSessionArbiter.UhfBusyException;
++import com.android.server.uhf.UhfSessionArbiter.UhfSafetyCeilingExceededException;
++
++import org.junit.Before;
++import org.junit.Test;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * Host-side, no-hardware unit tests for {@link UhfSessionArbiter}: the state machine behind
++ * session exclusivity (FR-LC-03/04/05/09), the antenna-check interlock (FR-ANT-02), the RF power
++ * ceiling (FR-PWR-03), and the streaming/buffered/tag-op mutual exclusion added in Rev B
++ * (FR-STR-13, FR-BUF-07). {@link FakeTransport} records every call it receives in order, which is
++ * what makes the interlock- and restart-ordering tests meaningful rather than just
++ * state-at-the-end checks.
++ */
++public class UhfSessionArbiterTest {
++
++    private FakeTransport transport;
++    private FakeRegionStore regionStore;
++    private FakeEventLog eventLog;
++    private UhfSessionArbiter arbiter;
++
++    @Before
++    public void setUp() throws Exception {
++        transport = new FakeTransport();
++        regionStore = new FakeRegionStore();
++        eventLog = new FakeEventLog();
++        arbiter = new UhfSessionArbiter(transport, regionStore, eventLog);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-LC-05 / FR-LC-09: startup reset
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void startupReset_forcesRealtimeModeOffUnconditionally() throws Exception {
++        arbiter.performStartupReset();
++        assertTrue(transport.calls.contains("open"));
++        assertTrue("must force out of real-time mode even though we have no idea what mode "
++                        + "the reader booted into",
++                transport.calls.contains("transact(0x76)"));
++    }
++
++    @Test
++    public void startupReset_reappliesPersistedRegionRegardlessOfReaderState() throws Exception {
++        regionStore.persisted = 0b0100; // EU
++        arbiter.performStartupReset();
++        assertTrue(transport.calls.contains("transact(0x22)"));
++        assertEquals(0b0100, transport.lastRegionWritten);
++    }
++
++    @Test
++    public void startupReset_orderIsRealtimeOffThenRegion() throws Exception {
++        arbiter.performStartupReset();
++        int realtimeIdx = transport.calls.indexOf("transact(0x76)");
++        int regionIdx = transport.calls.indexOf("transact(0x22)");
++        assertTrue(realtimeIdx >= 0 && regionIdx >= 0);
++        assertTrue("region should be reasserted after the port is known-idle",
++                realtimeIdx < regionIdx);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-LC-03/04: exclusivity and crash recovery
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void openSession_secondClientIsRejectedWhileFirstHolds() throws Exception {
++        Object clientA = new Object();
++        Object clientB = new Object();
++        arbiter.openSession(clientA);
++        try {
++            arbiter.openSession(clientB);
++            fail("expected UhfBusyException");
++        } catch (UhfBusyException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void openSession_availableAgainAfterGracefulClose() throws Exception {
++        Object clientA = new Object();
++        Object clientB = new Object();
++        arbiter.openSession(clientA);
++        arbiter.closeSession(clientA);
++        arbiter.openSession(clientB); // must not throw
++        assertTrue(arbiter.isHeldBy(clientB));
++    }
++
++    @Test
++    public void onClientDied_releasesSessionAndReturnsReaderToIdle() throws Exception {
++        Object clientA = new Object();
++        arbiter.openSession(clientA);
++        arbiter.startStreaming(clientA, new StreamRequest(4, 0), noopCallback());
++        assertTrue(arbiter.isStreaming(clientA));
++
++        arbiter.onClientDied(clientA); // simulates FR-LC-04's crash path
++
++        assertFalse(arbiter.isSessionOpen());
++        assertTrue("dying mid-stream must still stop the stream",
++                transport.calls.contains("stopStream"));
++        Object clientB = new Object();
++        arbiter.openSession(clientB); // must not still be BUSY
++    }
++
++    @Test
++    public void onClientDied_forAnUnrelatedTokenIsSafelyIgnored() throws Exception {
++        Object holder = new Object();
++        Object bystander = new Object();
++        arbiter.openSession(holder);
++        arbiter.onClientDied(bystander); // must not throw, must not release holder's session
++        assertTrue(arbiter.isHeldBy(holder));
++    }
++
++    @Test
++    public void onClientDied_neverThrowsEvenIfTransportCleanupFails() throws Exception {
++        Object clientA = new Object();
++        arbiter.openSession(clientA);
++        arbiter.startStreaming(clientA, new StreamRequest(4, 0), noopCallback());
++        transport.failStopStream = true;
++
++        arbiter.onClientDied(clientA); // must not throw despite the failing cleanup
++
++        assertFalse(arbiter.isSessionOpen());
++    }
++
++    @Test
++    public void closeSession_byNonHolderIsRejected() throws Exception {
++        Object holder = new Object();
++        Object other = new Object();
++        arbiter.openSession(holder);
++        try {
++            arbiter.closeSession(other);
++            fail("expected rejection: only the holder may close its own session");
++        } catch (IllegalStateException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void anyOperation_withoutAnOpenSessionIsRejected() {
++        Object bystander = new Object();
++        try {
++            arbiter.setRfPower(bystander, 10, false);
++            fail("expected rejection: no session is open at all");
++        } catch (Exception expected) {
++            assertTrue(expected instanceof IllegalStateException);
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-ANT-02: antenna-check interlock ordering
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void setEnabledAntennas_disablesCheckWritesMaskThenReenablesCheck_whenCheckWasOn()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setAntennaCheckEnabled(client, true);
++        transport.reset(); // isolate the mask-write sequence from setup noise
++
++        arbiter.setEnabledAntennas(client, 0b0011);
++
++        assertEquals("check-off, write-mask, check-on — exactly three calls, in that order",
++                List.of("transact(0x66)", "transact(0x3f)", "transact(0x66)"), transport.calls);
++        assertEquals(0, transport.lastAntennaCheckValue(0)); // first 0x66 call disabled it
++        assertEquals(1, transport.lastAntennaCheckValue(1)); // second 0x66 call re-enabled it
++    }
++
++    @Test
++    public void setEnabledAntennas_skipsTheInterlockWhenCheckWasAlreadyOff() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        // antennaCheckEnabled defaults to false; no setAntennaCheckEnabled(true) call.
++
++        arbiter.setEnabledAntennas(client, 0b0001);
++
++        assertEquals("no need to toggle a check that was never on",
++                List.of("transact(0x3f)"), transport.calls);
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-PWR-02/03: power ceiling
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void setRfPower_atOrBelowSafeCeilingSucceedsWithoutOverride() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setRfPower(client, UhfSessionArbiter.DEFAULT_SAFE_POWER_CEILING, false);
++        assertEquals(UhfSessionArbiter.DEFAULT_SAFE_POWER_CEILING, arbiter.getRfPower(client));
++    }
++
++    @Test
++    public void setRfPower_aboveCeilingWithoutOverrideIsRejectedBeforeReachingTheReader()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.reset();
++        try {
++            arbiter.setRfPower(client, UhfSessionArbiter.DEFAULT_SAFE_POWER_CEILING + 1, false);
++            fail("expected UhfSafetyCeilingExceededException");
++        } catch (UhfSafetyCeilingExceededException expected) {
++            assertEquals(UhfSessionArbiter.DEFAULT_SAFE_POWER_CEILING, expected.ceiling);
++            assertEquals(UhfSessionArbiter.DEFAULT_SAFE_POWER_CEILING + 1, expected.requested);
++        }
++        assertTrue("must be rejected in software, never sent to the reader",
++                transport.calls.isEmpty());
++    }
++
++    @Test
++    public void setRfPower_aboveCeilingSucceedsWithExplicitOverride() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setRfPower(client, 30, true);
++        assertEquals(30, arbiter.getRfPower(client));
++    }
++
++    @Test
++    public void setRfPower_aboveReaderMaximumIsRejectedEvenWithOverride() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.setRfPower(client, 31, true); // reader max is 30 by default
++            fail("FR-PWR-02: reader hardware max is not overridable by the safety flag");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void setRfPower_negativeIsRejected() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.setRfPower(client, -1, true);
++            fail("expected rejection of a negative power");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void safePowerCeiling_isConfigurableAndDefaultsCorrectly() {
++        assertEquals(UhfSessionArbiter.DEFAULT_SAFE_POWER_CEILING, arbiter.getSafePowerCeiling());
++        arbiter.setSafePowerCeiling(15);
++        assertEquals(15, arbiter.getSafePowerCeiling());
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-FRQ-04 / FR-LC-09: region changes are persisted and logged
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void setRegion_persistsAndLogsTheChange() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setRegion(client, 0b0010); // US
++
++        assertEquals(0b0010, regionStore.persisted);
++        assertEquals(1, eventLog.regionChanges.size());
++        assertEquals(0b0010, (int) eventLog.regionChanges.get(0));
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-STR-01/07: basic streaming lifecycle
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void startStreaming_thenStopStreaming_roundTrips() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        assertTrue(arbiter.isStreaming(client));
++
++        arbiter.stopStreaming(client);
++        assertFalse(arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void startStreaming_rejectsASecondStartWhileAlreadyStreaming() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        try {
++            arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++            fail("expected rejection of a redundant start");
++        } catch (IllegalStateException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void stopStreaming_explicitStopPreventsAnyLaterAutoRestart() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        arbiter.stopStreaming(client);
++        transport.reset();
++
++        // A subsequent config write must NOT restart a stream the caller explicitly stopped.
++        arbiter.setEnabledAntennas(client, 0b0001);
++
++        assertFalse(arbiter.isStreaming(client));
++        assertFalse(transport.calls.contains("startStream"));
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-STR-13 (Rev B): non-streaming calls stop-apply-restart around an active stream
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void setEnabledAntennas_whileStreaming_stopsAppliesThenRestartsTheStream()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        transport.reset();
++
++        arbiter.setEnabledAntennas(client, 0b0010);
++
++        assertEquals(List.of("stopStream", "transact(0x3f)", "startStream"), transport.calls);
++        assertTrue("stream must be running again afterward", arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void setRegion_doesNotStopAnActiveStream_becauseItIsNotGatedByStr13() throws Exception {
++        // Region writes are Confirm-status (0x22) and not currently listed among the operations
++        // FR-STR-13 names; this test documents that as current behaviour so a future change to
++        // gate it too is a deliberate decision, not an accidental regression either way.
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        transport.reset();
++
++        arbiter.setRegion(client, 0b0100);
++
++        assertTrue("streaming is left running for region writes as currently scoped",
++                arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void autoRestart_failureLeavesReaderIdleRatherThanThrowingOverTheOriginalResult()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        transport.failNextStartStream = true;
++
++        arbiter.setEnabledAntennas(client, 0b0001); // must not throw despite the failed restart
++
++        assertFalse("a failed auto-restart must be observable via isStreaming(), not hidden",
++                arbiter.isStreaming(client));
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-BUF-07 (Rev B): buffered inventory is mutually exclusive with streaming too
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void startBufferedInventory_whileStreaming_stopsTheStreamFirst() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        transport.reset();
++
++        arbiter.startBufferedInventory(client);
++
++        assertEquals(List.of("stopStream", "transact(0x18)"), transport.calls);
++        assertFalse("must not run streaming and buffered concurrently", arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void stopBufferedInventory_restartsTheStreamItInterrupted() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        arbiter.startBufferedInventory(client);
++        transport.reset();
++
++        arbiter.stopBufferedInventory(client);
++
++        assertEquals(List.of("transact(0x1a)", "startStream"), transport.calls);
++        assertTrue(arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void startBufferedInventory_withNoPriorStreamDoesNotFabricateARestart() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.reset();
++
++        arbiter.startBufferedInventory(client);
++        arbiter.stopBufferedInventory(client);
++
++        assertFalse("nothing to restart if nothing was interrupted",
++                transport.calls.contains("startStream"));
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // Test fixtures
++    // ---------------------------------------------------------------------------------------
++
++    private static UhfTransport.StreamCallback noopCallback() {
++        return new UhfTransport.StreamCallback() {
++            @Override public void onTagBatch(byte[][] rawTagRecords) {}
++            @Override public void onError(int transportErrorCode) {}
++        };
++    }
++
++    /** Records every call in order; lets tests assert both sequence and content. */
++    private static final class FakeTransport implements UhfTransport {
++        final List<String> calls = new ArrayList<>();
++        private final List<Integer> antennaCheckValues = new ArrayList<>();
++        int lastRegionWritten = -1;
++        boolean isOpen;
++        boolean failStopStream;
++        boolean failNextStartStream;
++
++        /**
++         * Clears recorded call history between the "setup" portion of a test and the sequence
++         * under actual assertion. Clears every recording list together — a partial reset (the
++         * bug this replaced) lets earlier setup calls leak into a later assertion silently.
++         */
++        void reset() {
++            calls.clear();
++            antennaCheckValues.clear();
++        }
++
++        @Override public void open() {
++            calls.add("open");
++            isOpen = true;
++        }
++
++        @Override public void close() {
++            calls.add("close");
++            isOpen = false;
++        }
++
++        @Override public boolean isOpen() {
++            return isOpen;
++        }
++
++        @Override public byte[] transact(int command, byte[] payload, int timeoutMs)
++                throws UhfTransportException {
++            calls.add("transact(0x" + Integer.toHexString(command) + ")");
++            if (command == 0x66 && payload.length > 0) {
++                antennaCheckValues.add((int) payload[0]);
++            }
++            if (command == 0x22 && payload.length > 0) {
++                lastRegionWritten = payload[0] & 0xFF;
++            }
++            return new byte[0];
++        }
++
++        @Override public void startStream(StreamCallback callback) throws UhfTransportException {
++            if (failNextStartStream) {
++                failNextStartStream = false;
++                throw new UhfTransportException(UhfProtocol.ERROR_TIMEOUT, "injected failure");
++            }
++            calls.add("startStream");
++        }
++
++        @Override public void stopStream() {
++            calls.add("stopStream");
++            if (failStopStream) {
++                // Per the UhfTransport contract stopStream() cannot throw a checked exception;
++                // simulate an unrecoverable stop by doing nothing further. onClientDied's
++                // best-effort catch around transact() (buffered mode) is exercised by a separate
++                // path — this field exists so onClientDied's "never throws" guarantee is tested
++                // even when the underlying stop is troublesome.
++            }
++        }
++
++        int lastAntennaCheckValue(int callIndex) {
++            return antennaCheckValues.get(callIndex);
++        }
++    }
++
++    private static final class FakeRegionStore implements UhfSessionArbiter.RegionStore {
++        int persisted = 0b0100; // EU, arbitrary default
++
++        @Override public int getPersistedRegionCode() {
++            return persisted;
++        }
++
++        @Override public void setPersistedRegionCode(int bandCode) {
++            persisted = bandCode;
++        }
++    }
++
++    private static final class FakeEventLog implements UhfSessionArbiter.EventLog {
++        final List<Integer> regionChanges = new ArrayList<>();
++
++        @Override public void onRegionChanged(Object clientToken, int newBandCode) {
++            regionChanges.add(newBandCode);
++        }
++    }
++}
+-- 
+2.34.1
+

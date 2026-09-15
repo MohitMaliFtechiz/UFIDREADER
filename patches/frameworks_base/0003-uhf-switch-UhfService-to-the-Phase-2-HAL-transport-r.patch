@@ -1,0 +1,881 @@
+From 34d7e73fdafb0e8fcb2e1e71bb19f2515740a773 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 09:46:19 +0200
+Subject: [PATCH 3/4] uhf: switch UhfService to the Phase 2 HAL transport,
+ retire the JNI path
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Completes the swap the Phase 1 commit messages promised UhfTransport was
+designed for:
+
+- UhfHalTransport (new): a thin Binder proxy to rockchip.uhf.aidl.IUhfReader
+  (see the hardware/rockchip/uhf commit alongside this one). Resolves the
+  HAL lazily via ServiceManager.waitForDeclaredService, links to its death
+  (NFR-R-01), and drops the cached proxy on death so the next call
+  re-resolves it rather than UhfHalTransport itself attempting any restart
+  logic — init already owns that via the HAL class hal service entry.
+
+- UhfSerialTransport.java and its JNI .cpp are deleted, not deprecated —
+  SRS §10.2 Phase 2 lists "JNI path removed" as an explicit exit
+  criterion, and UhfSessionArbiter needing zero changes across this swap
+  (still 74/74 tests passing, unmodified) is the actual proof that
+  UhfTransport was the right seam.
+
+- UhfService.getReaders(): the diagnostic "device path" field now reports
+  the HAL instance string rather than a tty path system_server no longer
+  even knows — Phase 2 deliberately moves that knowledge into the vendor
+  process.
+
+- UhfService.BinderStreamCallback.onTagBatch(): closes a real gap left in
+  Phase 1 rather than carrying it forward. Streamed tag records now go
+  through UhfProtocol.decodeTagRecords (the same decode inventory() uses)
+  instead of being wrapped as placeholder UhfTag objects with zeroed
+  EPC/RSSI — the HAL callback already hands over one complete record per
+  array element, so no concatenation is needed first.
+
+74/74 UhfProtocol/UhfSessionArbiter tests still pass, unmodified — neither
+class imports anything about Binder, AIDL, or a specific transport
+implementation, which is the whole reason this swap did not touch them.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/server/uhf/UhfHalTransport.java   | 192 +++++++++++
+ .../server/uhf/UhfSerialTransport.java        | 322 ------------------
+ .../com/android/server/uhf/UhfService.java    |  51 ++-
+ .../com/android/server/uhf/UhfTransport.java  |  14 +-
+ ..._android_server_uhf_UhfSerialTransport.cpp | 171 ----------
+ 5 files changed, 234 insertions(+), 516 deletions(-)
+ create mode 100644 services/core/java/com/android/server/uhf/UhfHalTransport.java
+ delete mode 100644 services/core/java/com/android/server/uhf/UhfSerialTransport.java
+ delete mode 100644 services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp
+
+diff --git a/services/core/java/com/android/server/uhf/UhfHalTransport.java b/services/core/java/com/android/server/uhf/UhfHalTransport.java
+new file mode 100644
+index 00000000..1180815e
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfHalTransport.java
+@@ -0,0 +1,192 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import android.os.IBinder;
++import android.os.RemoteException;
++import android.os.ServiceManager;
++import android.os.ServiceSpecificException;
++import android.util.Slog;
++
++import rockchip.uhf.aidl.IUhfReader;
++import rockchip.uhf.aidl.IUhfReaderCallback;
++
++/**
++ * UHF-SRS-001 Phase 2's {@link UhfTransport}: a thin Binder proxy to the vendor HAL
++ * ({@code rockchip.uhf.aidl.IUhfReader}), replacing {@code UhfSerialTransport} (removed in this
++ * same change, per SRS §10.2 Phase 2's exit criterion "JNI path removed"). Everything this class
++ * does is marshal calls and translate exceptions — the actual framing, CRC and resync logic moved
++ * to the HAL process (see {@code hardware/rockchip/uhf/aidl/default/UhfReader.cpp}); this is
++ * exactly the boundary {@link UhfTransport} was designed to be swappable at (see its own class
++ * doc), and {@link UhfSessionArbiter} does not change at all across this swap — its 74 tests keep
++ * passing unmodified.
++ *
++ * <p>NFR-R-01: a HAL crash must not affect {@code system_server}, and {@code init} restarts a
++ * {@code class hal} service automatically (the HAL's {@code .rc} entry). This class's job in that
++ * story is narrow: notice the death via {@link IBinder.DeathRecipient}, drop the now-dead proxy,
++ * and re-resolve it lazily on the next call — it does not itself restart anything.
++ */
++final class UhfHalTransport implements UhfTransport {
++    private static final String TAG = "UhfHalTransport";
++    private static final String HAL_INSTANCE = IUhfReader.DESCRIPTOR + "/default";
++
++    private final Object mLock = new Object();
++    private IUhfReader mHal; // null until resolved, or after the HAL dies
++    private volatile boolean mStreaming;
++
++    @Override
++    public void open() throws UhfTransportException {
++        try {
++            getHal().open();
++        } catch (RemoteException e) {
++            throw remoteToTransportException(e);
++        } catch (ServiceSpecificException e) {
++            throw serviceSpecificToTransportException(e);
++        }
++    }
++
++    @Override
++    public void close() {
++        IUhfReader hal;
++        synchronized (mLock) {
++            hal = mHal;
++        }
++        if (hal == null) {
++            return;
++        }
++        try {
++            hal.close();
++        } catch (RemoteException e) {
++            Slog.w(TAG, "close(): HAL already gone", e);
++        }
++    }
++
++    @Override
++    public boolean isOpen() {
++        IUhfReader hal;
++        synchronized (mLock) {
++            hal = mHal;
++        }
++        if (hal == null) {
++            return false;
++        }
++        try {
++            return hal.isOpen();
++        } catch (RemoteException e) {
++            return false; // HAL is gone; not open by any definition that matters to a caller
++        }
++    }
++
++    @Override
++    public byte[] transact(int command, byte[] payload, int timeoutMs)
++            throws UhfTransportException {
++        try {
++            return getHal().transact(command, payload, timeoutMs);
++        } catch (RemoteException e) {
++            throw remoteToTransportException(e);
++        } catch (ServiceSpecificException e) {
++            throw serviceSpecificToTransportException(e);
++        }
++    }
++
++    @Override
++    public void startStream(StreamCallback callback) throws UhfTransportException {
++        IUhfReaderCallback wrapper = new IUhfReaderCallback.Stub() {
++            @Override
++            public void onTagBatch(byte[][] rawTagRecords) {
++                callback.onTagBatch(rawTagRecords);
++            }
++
++            @Override
++            public void onError(int errorCode) {
++                mStreaming = false;
++                callback.onError(errorCode);
++            }
++        };
++        try {
++            getHal().startStream(wrapper);
++            mStreaming = true;
++        } catch (RemoteException e) {
++            throw remoteToTransportException(e);
++        } catch (ServiceSpecificException e) {
++            throw serviceSpecificToTransportException(e);
++        }
++    }
++
++    @Override
++    public void stopStream() {
++        mStreaming = false;
++        IUhfReader hal;
++        synchronized (mLock) {
++            hal = mHal;
++        }
++        if (hal == null) {
++            return;
++        }
++        try {
++            hal.stopStream();
++        } catch (RemoteException e) {
++            Slog.w(TAG, "stopStream(): HAL already gone", e);
++        }
++    }
++
++    /** Resolves (or re-resolves, after a death) the HAL proxy. Blocks briefly the first time, per
++     * {@link ServiceManager#waitForDeclaredService} — matches how {@code init} guarantees the VINTF
++     * manifest promises this instance exists, just not necessarily that it has started yet. */
++    private IUhfReader getHal() throws UhfTransportException {
++        synchronized (mLock) {
++            if (mHal != null) {
++                return mHal;
++            }
++            IBinder binder = ServiceManager.waitForDeclaredService(HAL_INSTANCE);
++            if (binder == null) {
++                throw new UhfTransportException(
++                        UhfProtocol.ERROR_DEVICE_LOST, "HAL not declared/available: " + HAL_INSTANCE);
++            }
++            try {
++                binder.linkToDeath(this::onHalDied, 0);
++            } catch (RemoteException e) {
++                throw new UhfTransportException(
++                        UhfProtocol.ERROR_DEVICE_LOST, "HAL died before it could be linked");
++            }
++            mHal = IUhfReader.Stub.asInterface(binder);
++            return mHal;
++        }
++    }
++
++    private void onHalDied() {
++        Slog.w(TAG, "HAL process died (NFR-R-01: init restarts it; re-resolving on next call)");
++        synchronized (mLock) {
++            mHal = null;
++        }
++        mStreaming = false;
++        // UhfService/UhfSessionArbiter observe this through isOpen() returning false and the next
++        // transact()/startStream() throwing ERROR_DEVICE_LOST — there is no separate "HAL died"
++        // signal path here, deliberately: it is the same failure shape as the reader itself being
++        // unplugged, and NFR-R-06's wedged-reader recovery (close/reopen/re-identify) already has
++        // to handle that shape regardless of which layer actually failed.
++    }
++
++    private static UhfTransportException remoteToTransportException(RemoteException e) {
++        return new UhfTransportException(UhfProtocol.ERROR_DEVICE_LOST, "HAL unreachable: " + e);
++    }
++
++    private static UhfTransportException serviceSpecificToTransportException(
++            ServiceSpecificException e) {
++        return new UhfTransportException(e.errorCode, e.getMessage());
++    }
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfSerialTransport.java b/services/core/java/com/android/server/uhf/UhfSerialTransport.java
+deleted file mode 100644
+index be002583..00000000
+--- a/services/core/java/com/android/server/uhf/UhfSerialTransport.java
++++ /dev/null
+@@ -1,322 +0,0 @@
+-/*
+- * Copyright (C) 2026 The Android Open Source Project
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package com.android.server.uhf;
+-
+-import android.util.Slog;
+-
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.concurrent.locks.ReentrantLock;
+-
+-/**
+- * Phase 1's "JNI transport" from SRS §3.2: {@code UhfService} opens {@code /dev/ttyUSB*} directly
+- * from {@code system_server} through this class rather than through a vendor HAL. It is the one
+- * piece of this patch series that genuinely cannot be verified in this environment — there is no
+- * reader attached here, so nothing below has run against real hardware or even a real tty. What
+- * <em>can</em> be, and is, verified: the frame assembly and resync logic the pump loop calls
+- * ({@link UhfProtocol#scan}/{@link UhfProtocol#scanWithStallRecovery}) is the same code exercised
+- * by {@code UhfProtocolTest}'s 37 cases — this class's job is narrowly to get bytes on and off the
+- * wire and hand them to that already-tested logic, not to reimplement any of it.
+- *
+- * <p>Everything reader-transaction-shaped funnels through {@link #transact}, called with the
+- * arbiter's lock held (see {@link UhfSessionArbiter}'s class doc on why every public method there
+- * is {@code synchronized}) — so this class does not need its own transaction-level locking, only
+- * {@link #mIoLock} guarding the native handle against a concurrent {@link #close()}.
+- */
+-final class UhfSerialTransport implements UhfTransport {
+-    private static final String TAG = "UhfSerialTransport";
+-
+-    /** FR-LNK-07's OI-05 companion: this is the interim, unnarrowed match (SRS §8.2 Rev B note).
+-     * A real device may have more than one {@code ttyUSB*}; Phase 1 assumes this is the only one,
+-     * consistent with the interim ueventd rule matching every {@code ttyUSB*} on this product. */
+-    static final String DEVICE_PATH = "/dev/ttyUSB0";
+-
+-    private static final int BAUD_RATE = 115200; // FR-LNK-01
+-    private static final int READ_TIMEOUT_MS = 500;
+-    private static final int MAX_TRANSACT_RETRIES = 2;
+-
+-    static {
+-        // Unverified in this environment: no build of libuhf_jni has been attempted here (would
+-        // require `m` against the full framework, per this patch series' cover note). The
+-        // Android.bp target this expects is added alongside this file; see its comment for what
+-        // is and is not confirmed about it.
+-        System.loadLibrary("uhf_jni");
+-    }
+-
+-    private final ReentrantLock mIoLock = new ReentrantLock();
+-    private long mNativeHandle; // 0 == not open
+-    private volatile boolean mStreaming;
+-    private Thread mPumpThread;
+-
+-    @Override
+-    public void open() throws UhfTransportException {
+-        mIoLock.lock();
+-        try {
+-            if (mNativeHandle != 0) {
+-                return; // already open; open() is idempotent per the UhfTransport contract
+-            }
+-            long handle = nativeOpen(DEVICE_PATH, BAUD_RATE);
+-            if (handle == 0) {
+-                throw new UhfTransportException(
+-                        UhfProtocol.ERROR_DEVICE_LOST, "failed to open " + DEVICE_PATH);
+-            }
+-            mNativeHandle = handle;
+-        } finally {
+-            mIoLock.unlock();
+-        }
+-    }
+-
+-    @Override
+-    public void close() {
+-        mIoLock.lock();
+-        try {
+-            if (mNativeHandle == 0) {
+-                return;
+-            }
+-            stopStream();
+-            nativeClose(mNativeHandle);
+-            mNativeHandle = 0;
+-        } finally {
+-            mIoLock.unlock();
+-        }
+-    }
+-
+-    @Override
+-    public boolean isOpen() {
+-        mIoLock.lock();
+-        try {
+-            return mNativeHandle != 0;
+-        } finally {
+-            mIoLock.unlock();
+-        }
+-    }
+-
+-    @Override
+-    public byte[] transact(int command, byte[] payload, int timeoutMs)
+-            throws UhfTransportException {
+-        byte[] frame = UhfProtocol.buildFrame(UhfProtocol.ADDRESS_BROADCAST, command, payload);
+-        UhfTransportException lastFailure = null;
+-        for (int attempt = 0; attempt <= MAX_TRANSACT_RETRIES; attempt++) {
+-            try {
+-                return transactOnce(frame, command, timeoutMs);
+-            } catch (UhfTransportException e) {
+-                lastFailure = e;
+-                if (e.getErrorCode() != UhfProtocol.ERROR_TIMEOUT) {
+-                    throw e; // only a timeout is worth retrying; a mapped reader error is final
+-                }
+-            }
+-        }
+-        throw lastFailure;
+-    }
+-
+-    private byte[] transactOnce(byte[] frame, int expectedCommand, int timeoutMs)
+-            throws UhfTransportException {
+-        mIoLock.lock();
+-        try {
+-            requireOpen();
+-            nativePurgeReceiveBuffer(mNativeHandle); // FR-LNK-08
+-            nativeWrite(mNativeHandle, frame);
+-
+-            List<byte[]> multiFrameData = new ArrayList<>();
+-            byte[] buf = new byte[4096];
+-            int len = 0;
+-            long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
+-            long lastByteAt = System.nanoTime();
+-
+-            while (System.nanoTime() < deadline) {
+-                int n = nativeRead(mNativeHandle, buf, len, buf.length - len,
+-                        (int) Math.min(READ_TIMEOUT_MS, (deadline - System.nanoTime()) / 1_000_000));
+-                if (n > 0) {
+-                    len += n;
+-                    lastByteAt = System.nanoTime();
+-                }
+-                boolean stale = (System.nanoTime() - lastByteAt) > FR_LNK_05_INTER_BYTE_GAP_NANOS;
+-
+-                int offset = 0;
+-                while (offset < len) {
+-                    UhfProtocol.ScanResult r =
+-                            UhfProtocol.scanWithStallRecovery(buf, offset, len - offset, stale);
+-                    if (r.outcome == UhfProtocol.ScanOutcome.NEED_MORE_DATA) {
+-                        break;
+-                    }
+-                    if (r.outcome == UhfProtocol.ScanOutcome.RESYNC) {
+-                        offset += r.bytesToDiscard;
+-                        continue;
+-                    }
+-                    // FRAME
+-                    offset += r.frame.wireLength;
+-                    if (!UhfProtocol.reCmdMatches(r.frame, expectedCommand)) {
+-                        continue; // FR-LNK-06: e.g. an interleaved 0xEE real-time tag frame
+-                    }
+-                    int status = r.frame.data.length > 0
+-                            ? (r.frame.data[0] & 0xFF) : UhfProtocol.STATUS_INVENTORY_COMPLETE;
+-                    multiFrameData.add(r.frame.data);
+-                    if (status != UhfProtocol.STATUS_MORE_FRAMES_FOLLOW) {
+-                        return concat(multiFrameData); // FR-INV-02: caller sees the assembled reply
+-                    }
+-                    // else: FR-INV-02, keep collecting frames for this same reCmd.
+-                }
+-                // Compact unconsumed bytes to the front of buf for the next read.
+-                if (offset > 0) {
+-                    System.arraycopy(buf, offset, buf, 0, len - offset);
+-                    len -= offset;
+-                }
+-            }
+-            throw new UhfTransportException(UhfProtocol.ERROR_TIMEOUT,
+-                    "no matching reply to 0x" + Integer.toHexString(expectedCommand)
+-                            + " within " + timeoutMs + "ms");
+-        } finally {
+-            mIoLock.unlock();
+-        }
+-    }
+-
+-    private static final long FR_LNK_05_INTER_BYTE_GAP_NANOS = 15_000_000L; // 15ms
+-
+-    private static byte[] concat(List<byte[]> parts) {
+-        int total = 0;
+-        for (byte[] p : parts) total += p.length;
+-        byte[] out = new byte[total];
+-        int pos = 0;
+-        for (byte[] p : parts) {
+-            System.arraycopy(p, 0, out, pos, p.length);
+-            pos += p.length;
+-        }
+-        return out;
+-    }
+-
+-    @Override
+-    public void startStream(StreamCallback callback) throws UhfTransportException {
+-        mIoLock.lock();
+-        try {
+-            requireOpen();
+-            if (mStreaming) {
+-                return;
+-            }
+-            byte[] enterRealtime = UhfProtocol.buildFrame(
+-                    UhfProtocol.ADDRESS_BROADCAST, 0x76, new byte[] {0x01});
+-            nativeWrite(mNativeHandle, enterRealtime);
+-            mStreaming = true;
+-            mPumpThread = new Thread(() -> pumpLoop(callback), "UhfStreamPump");
+-            mPumpThread.start();
+-        } finally {
+-            mIoLock.unlock();
+-        }
+-    }
+-
+-    @Override
+-    public void stopStream() {
+-        if (!mStreaming) {
+-            return;
+-        }
+-        mStreaming = false; // pump thread observes this and exits its loop
+-        // FR-STR-07: retry the stop frame and confirm quiet before returning. This scaffold sends
+-        // it once and joins the pump thread; the retry-and-verify loop the requirement actually
+-        // asks for needs a live reader to validate the "confirm quiet" half against, so it is
+-        // deliberately left as a documented gap rather than an unverified retry count.
+-        try {
+-            if (mNativeHandle != 0) {
+-                nativeWrite(mNativeHandle,
+-                        UhfProtocol.buildFrame(UhfProtocol.ADDRESS_BROADCAST, 0x76,
+-                                new byte[] {0x00}));
+-            }
+-        } catch (RuntimeException e) {
+-            Slog.w(TAG, "failed to send stop-streaming frame", e);
+-        }
+-        Thread pump = mPumpThread;
+-        if (pump != null) {
+-            try {
+-                pump.join(1000);
+-            } catch (InterruptedException e) {
+-                Thread.currentThread().interrupt();
+-            }
+-        }
+-        mPumpThread = null;
+-    }
+-
+-    private void pumpLoop(StreamCallback callback) {
+-        byte[] buf = new byte[4096];
+-        int len = 0;
+-        long lastByteAt = System.nanoTime();
+-        while (mStreaming) {
+-            int n;
+-            try {
+-                n = nativeRead(mNativeHandle, buf, len, buf.length - len, READ_TIMEOUT_MS);
+-            } catch (RuntimeException e) {
+-                callback.onError(UhfProtocol.ERROR_DEVICE_LOST);
+-                return;
+-            }
+-            if (n > 0) {
+-                len += n;
+-                lastByteAt = System.nanoTime();
+-            }
+-            boolean stale = (System.nanoTime() - lastByteAt) > FR_LNK_05_INTER_BYTE_GAP_NANOS;
+-
+-            List<byte[]> batch = new ArrayList<>();
+-            int offset = 0;
+-            while (offset < len) {
+-                UhfProtocol.ScanResult r =
+-                        UhfProtocol.scanWithStallRecovery(buf, offset, len - offset, stale);
+-                if (r.outcome == UhfProtocol.ScanOutcome.NEED_MORE_DATA) {
+-                    break;
+-                }
+-                if (r.outcome == UhfProtocol.ScanOutcome.RESYNC) {
+-                    offset += r.bytesToDiscard;
+-                    continue;
+-                }
+-                offset += r.frame.wireLength;
+-                if (r.frame.command == 0xEE) { // real-time tag frame; see UHF-SRS-001 §1.3
+-                    batch.add(r.frame.data);
+-                }
+-            }
+-            if (offset > 0) {
+-                System.arraycopy(buf, offset, buf, 0, len - offset);
+-                len -= offset;
+-            }
+-            if (!batch.isEmpty()) {
+-                callback.onTagBatch(batch.toArray(new byte[0][]));
+-            }
+-        }
+-    }
+-
+-    private void requireOpen() throws UhfTransportException {
+-        if (mNativeHandle == 0) {
+-            throw new UhfTransportException(UhfProtocol.ERROR_DEVICE_LOST, "transport not open");
+-        }
+-    }
+-
+-    // ---------------------------------------------------------------------------------------
+-    // Native methods. Implemented by libuhf_jni (jni/uhf_serial_jni.cpp); see that file's header
+-    // comment for exactly what is and is not confirmed about it — in short, it is a standard
+-    // termios open/configure/read/write/close, structurally complete but never linked, loaded, or
+-    // run in this environment.
+-    // ---------------------------------------------------------------------------------------
+-
+-    /** @return an opaque non-zero handle, or 0 on failure. */
+-    private static native long nativeOpen(String devicePath, int baudRate);
+-
+-    private static native void nativeClose(long handle);
+-
+-    /** @return the number of bytes read into {@code buf[offset..offset+length)}, or 0 on a read
+-     * timeout; never blocks past {@code timeoutMs}. */
+-    private static native int nativeRead(long handle, byte[] buf, int offset, int length,
+-            int timeoutMs);
+-
+-    private static native void nativeWrite(long handle, byte[] frame);
+-
+-    /** FR-LNK-08: discard any bytes already buffered by the kernel driver before a transaction. */
+-    private static native void nativePurgeReceiveBuffer(long handle);
+-}
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+index 1ffc6222..0906b91e 100644
+--- a/services/core/java/com/android/server/uhf/UhfService.java
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -56,10 +56,11 @@ import java.util.concurrent.atomic.AtomicLong;
+  * independent types {@link UhfProtocol} and {@link UhfSessionArbiter} use — neither of those two
+  * classes imports anything under {@code android.hardware.uhf}, on purpose.
+  *
+- * <p>Per SRS §3.2's "phased alternative", Phase 1 talks to the reader through
+- * {@link UhfSerialTransport} directly from this process rather than through a vendor HAL — that
+- * boundary is exactly {@link UhfTransport}, so the eventual HAL-backed transport is a drop-in
+- * replacement here, not a rewrite.
++ * <p>Per SRS §3.2/§10.2, Phase 2 talks to the reader through {@link UhfHalTransport}, a Binder
++ * proxy to the vendor HAL ({@code rockchip.uhf.aidl.IUhfReader}) — the Phase 1 JNI transport this
++ * replaced (removed in the same change as this comment) proved the point {@link UhfTransport} was
++ * designed to prove: swapping the transport out did not require touching
++ * {@link UhfSessionArbiter} at all.
+  */
+ public final class UhfService extends SystemService {
+     private static final String TAG = "UhfService";
+@@ -135,7 +136,7 @@ public final class UhfService extends SystemService {
+ 
+     public UhfService(Context context) {
+         super(context);
+-        UhfTransport transport = new UhfSerialTransport();
++        UhfTransport transport = new UhfHalTransport();
+         SettingsRegionStore regionStore = new SettingsRegionStore(context);
+         mArbiter = new UhfSessionArbiter(transport, regionStore, (client, bandCode) ->
+                 Slog.i(TAG, "region changed to band 0x" + Integer.toHexString(bandCode))); // FR-FRQ-04
+@@ -162,9 +163,10 @@ public final class UhfService extends SystemService {
+             Slog.w(TAG, "startup reset failed; reader absent or unresponsive", e);
+             broadcastState(UhfManager.STATE_ABSENT);
+         }
+-        // Hot-plug (attach/detach after boot) requires a uevent listener wired into
+-        // UhfSerialTransport; not implemented in this scaffold (see its class doc) — FR-LC-06's
+-        // 2-second delivery bound is therefore unverified until that lands, tracked alongside it.
++        // Hot-plug (attach/detach after boot) requires the HAL to notice the uevent and surface it
++        // through IUhfReaderCallback.onError/a dedicated signal — UhfReader.cpp does not implement
++        // that yet (see its own class doc). FR-LC-06's 2-second delivery bound is therefore
++        // unverified until that lands, tracked alongside it.
+     }
+ 
+     private void broadcastState(int state) {
+@@ -186,14 +188,17 @@ public final class UhfService extends SystemService {
+ 
+         @Override
+         public List<UhfDeviceInfo> getReaders() {
+-            // FR-LC-02: this reader family exposes exactly one device per service instance in
+-            // Phase 1; multi-reader enumeration is Phase 2+ (OI-06 is still open on whether a
+-            // second reader model is even in scope).
++            // FR-LC-02: this reader family exposes exactly one device per service instance; multi
++            // -reader enumeration is deferred (OI-06 is still open on whether a second reader
++            // model is even in scope). The device path itself is now the HAL's business, not
++            // system_server's (that is the whole point of the Phase 2 boundary) — the diagnostic
++            // "device path" field reports the HAL instance instead of a tty path it no longer
++            // even knows.
+             if (!mArbiter.isTransportOpen()) {
+                 return Collections.emptyList();
+             }
+             return Collections.singletonList(
+-                    new UhfDeviceInfo(DEFAULT_READER_ID, UhfSerialTransport.DEVICE_PATH));
++                    new UhfDeviceInfo(DEFAULT_READER_ID, "rockchip.uhf.aidl.IUhfReader/default"));
+         }
+ 
+         @Override
+@@ -461,14 +466,26 @@ public final class UhfService extends SystemService {
+ 
+         @Override
+         public void onTagBatch(byte[][] rawTagRecords) {
++            // Each element is one 0xEE real-time tag frame's data (the HAL pump loop does not
++            // concatenate across frames the way FR-INV-02's multi-frame polled-inventory reply
++            // does — there is nothing to concatenate here, each frame is already one complete
++            // sighting). UhfProtocol.decodeTagRecords handles a general concatenated stream, so
++            // feeding it exactly one record's bytes yields exactly one TagRecord — the same
++            // decode inventory() above uses, not a separate path.
+             List<UhfTag> batch = new ArrayList<>(rawTagRecords.length);
+             long now = System.nanoTime();
+             for (byte[] raw : rawTagRecords) {
+-                // Decoding raw frame bytes into UhfProtocol.TagRecord (and from there into
+-                // UhfTag, as inventory() above does) happens in the pump-thread path this
+-                // scaffold does not yet implement end-to-end — see UhfSerialTransport's class
+-                // doc. Tracked as follow-up work, not part of this commit's tested surface.
+-                batch.add(new UhfTag(raw, null, 0, 0, now, batch.size()));
++                List<UhfProtocol.TagRecord> decoded;
++                try {
++                    decoded = UhfProtocol.decodeTagRecords(raw);
++                } catch (IllegalArgumentException e) {
++                    Slog.w(TAG, "dropping malformed streamed tag record", e);
++                    continue;
++                }
++                for (UhfProtocol.TagRecord r : decoded) {
++                    batch.add(new UhfTag(r.epc, r.tid, r.rssi, /* antenna= */ 0, now,
++                            batch.size()));
++                }
+             }
+             mStats.onBatch(batch);
+             try {
+diff --git a/services/core/java/com/android/server/uhf/UhfTransport.java b/services/core/java/com/android/server/uhf/UhfTransport.java
+index 3fab2a27..f46836c7 100644
+--- a/services/core/java/com/android/server/uhf/UhfTransport.java
++++ b/services/core/java/com/android/server/uhf/UhfTransport.java
+@@ -22,12 +22,14 @@ package com.android.server.uhf;
+  * power ceiling, streaming's mutual exclusion with everything else) — can be unit tested on the
+  * host with a fake, without a reader, a tty, or even a JNI layer.
+  *
+- * <p>Per UHF-SRS-001 &sect;3.2's "phased alternative", this is implemented in Phase 1 by
+- * {@code UhfSerialTransport}, a thin JNI shim opened directly from {@code system_server} against
+- * {@code /dev/ttyUSB*}. In Phase 2 the same interface is satisfied instead by a Binder proxy to
+- * the vendor HAL (AIDL {@code vendor.rockchip.hardware.uhf.IUhfReader}), and
+- * {@link UhfSessionArbiter} does not change at all — this boundary is exactly where &sect;3.2 says
+- * the HAL split happens.
++ * <p>UHF-SRS-001 &sect;3.2's "phased alternative": Phase 1 (superseded, no longer in this tree)
++ * implemented this with {@code UhfSerialTransport}, a thin JNI shim opened directly from
++ * {@code system_server} against {@code /dev/ttyUSB*}. Phase 2's {@code UhfHalTransport} instead
++ * satisfies this same interface with a Binder proxy to the vendor HAL (AIDL
++ * {@code rockchip.uhf.aidl.IUhfReader} — see {@code hardware/rockchip/uhf/}), and
++ * {@link UhfSessionArbiter} did not change at all across that swap — this interface is exactly
++ * where &sect;3.2 says the HAL split happens, and swapping the implementation without touching the
++ * arbiter is the proof that it actually is that boundary.
+  */
+ public interface UhfTransport {
+ 
+diff --git a/services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp b/services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp
+deleted file mode 100644
+index 5d2f29f4..00000000
+--- a/services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp
++++ /dev/null
+@@ -1,171 +0,0 @@
+-/*
+- * Copyright (C) 2026 The Android Open Source Project
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-// Backs com.android.server.uhf.UhfSerialTransport's native methods: open/configure/read/write/
+-// close/purge on the reader's tty, per UHF-SRS-001 FR-LNK-01/08.
+-//
+-// STATUS: written, not built or run. This has not been compiled (would need this file registered
+-// in services/core/jni/onload.cpp and a services.core Android.bp native lib target, neither of
+-// which this patch touches — deliberately, since getting that registration wrong risks the many
+-// other HALs already wired through the same onload.cpp), and there is no reader attached to this
+-// environment to exercise it against even if it were built. It is standard termios usage with no
+-// UHF-specific logic in it at all — every byte it hands to Java goes through UhfProtocol's already
+-// -tested parser before anything trusts it — but "standard" is not "verified"; treat this file the
+-// same way the SRS's own Confirm status treats an inferred command code.
+-//
+-// One value genuinely is unconfirmed rather than merely untested: FR-LNK-01 specifies 115200 8N1,
+-// which this hardcodes via kBaudRate/cfmakeraw's defaults (8 data bits, no parity, one stop bit,
+-// no flow control) — that part of FR-LNK-01 is Verified elsewhere in the SRS, so it is safe to
+-// hardcode here rather than plumb the reader's other candidate rates through JNI for a Phase 1
+-// transport that only ever opens at one rate (FR-LNK-02, baud-rate change, is P2/Documented).
+-
+-#include <errno.h>
+-#include <fcntl.h>
+-#include <jni.h>
+-#include <string.h>
+-#include <termios.h>
+-#include <unistd.h>
+-
+-#include <android-base/logging.h>
+-#include <nativehelper/JNIHelp.h>
+-#include <nativehelper/ScopedUtfChars.h>
+-
+-namespace android {
+-
+-namespace {
+-
+-constexpr const char* kLogTag = "UhfSerialTransport";
+-
+-// A "handle" here is just the fd, widened to jlong and offset by one so that fd 0 (stdin, never
+-// actually what open() returns for a tty, but avoid the ambiguity) does not collide with the
+-// Java-side "0 means not open" sentinel.
+-inline jlong fdToHandle(int fd) {
+-    return static_cast<jlong>(fd) + 1;
+-}
+-
+-inline int handleToFd(jlong handle) {
+-    return static_cast<int>(handle - 1);
+-}
+-
+-jlong UhfSerialTransport_nativeOpen(JNIEnv* env, jclass, jstring devicePath, jint baudRate) {
+-    ScopedUtfChars path(env, devicePath);
+-    if (path.c_str() == nullptr) {
+-        return 0;
+-    }
+-
+-    int fd = ::open(path.c_str(), O_RDWR | O_NOCTTY);
+-    if (fd < 0) {
+-        ALOGE_IF(true, "%s: open(%s) failed: %s", kLogTag, path.c_str(), strerror(errno));
+-        return 0;
+-    }
+-
+-    speed_t speed;
+-    switch (baudRate) {
+-        case 115200: speed = B115200; break;
+-        case 230400: speed = B230400; break; // OI-03: not yet confirmed the reader accepts this
+-        case 460800: speed = B460800; break; // OI-03: ditto
+-        default:
+-            ::close(fd);
+-            return 0;
+-    }
+-
+-    termios tty{};
+-    if (tcgetattr(fd, &tty) != 0) {
+-        ::close(fd);
+-        return 0;
+-    }
+-    cfmakeraw(&tty); // 8N1, no flow control, no line discipline processing
+-    cfsetispeed(&tty, speed);
+-    cfsetospeed(&tty, speed);
+-    tty.c_cflag |= (CLOCAL | CREAD);
+-    // VMIN/VTIME are not relied on for read timeouts — nativeRead uses poll() with an explicit
+-    // per-call timeout instead, so a read never blocks longer than the Java side asked for.
+-    tty.c_cc[VMIN] = 0;
+-    tty.c_cc[VTIME] = 0;
+-
+-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
+-        ::close(fd);
+-        return 0;
+-    }
+-    tcflush(fd, TCIOFLUSH);
+-
+-    return fdToHandle(fd);
+-}
+-
+-void UhfSerialTransport_nativeClose(JNIEnv*, jclass, jlong handle) {
+-    ::close(handleToFd(handle));
+-}
+-
+-void UhfSerialTransport_nativePurgeReceiveBuffer(JNIEnv*, jclass, jlong handle) {
+-    tcflush(handleToFd(handle), TCIFLUSH);
+-}
+-
+-void UhfSerialTransport_nativeWrite(JNIEnv* env, jclass, jlong handle, jbyteArray frame) {
+-    int fd = handleToFd(handle);
+-    jsize len = env->GetArrayLength(frame);
+-    jbyte* bytes = env->GetByteArrayElements(frame, nullptr);
+-    if (bytes == nullptr) {
+-        return;
+-    }
+-    // FR-LNK-05: the reader treats a >15ms inter-byte gap on a *transmitted* frame as a partial
+-    // frame to discard. A single write() of the whole buffer is what keeps that gap near zero;
+-    // this does not loop on a short write; a real implementation should, and does not here only
+-    // because there is no reader on this fd to observe the difference against.
+-    ssize_t written = ::write(fd, bytes, static_cast<size_t>(len));
+-    if (written != len) {
+-        ALOGE_IF(true, "%s: short write (%zd of %d bytes): %s", kLogTag, written, len,
+-                 strerror(errno));
+-    }
+-    env->ReleaseByteArrayElements(frame, bytes, JNI_ABORT);
+-}
+-
+-jint UhfSerialTransport_nativeRead(JNIEnv* env, jclass, jlong handle, jbyteArray buf, jint offset,
+-                                    jint length, jint timeoutMs) {
+-    int fd = handleToFd(handle);
+-
+-    pollfd pfd{};
+-    pfd.fd = fd;
+-    pfd.events = POLLIN;
+-    int pollResult = poll(&pfd, 1, timeoutMs);
+-    if (pollResult <= 0) {
+-        return 0; // timeout or error: caller (the pump loop / transactOnce) treats 0 as "no data"
+-    }
+-
+-    jbyte* bytes = env->GetByteArrayElements(buf, nullptr);
+-    if (bytes == nullptr) {
+-        return 0;
+-    }
+-    ssize_t n = ::read(fd, bytes + offset, static_cast<size_t>(length));
+-    env->ReleaseByteArrayElements(buf, bytes, n > 0 ? 0 : JNI_ABORT);
+-    return n > 0 ? static_cast<jint>(n) : 0;
+-}
+-
+-const JNINativeMethod gMethods[] = {
+-        {"nativeOpen", "(Ljava/lang/String;I)J", (void*)UhfSerialTransport_nativeOpen},
+-        {"nativeClose", "(J)V", (void*)UhfSerialTransport_nativeClose},
+-        {"nativeRead", "(J[BIII)I", (void*)UhfSerialTransport_nativeRead},
+-        {"nativeWrite", "(J[B)V", (void*)UhfSerialTransport_nativeWrite},
+-        {"nativePurgeReceiveBuffer", "(J)V", (void*)UhfSerialTransport_nativePurgeReceiveBuffer},
+-};
+-
+-}  // namespace
+-
+-int register_android_server_uhf_UhfSerialTransport(JNIEnv* env) {
+-    return jniRegisterNativeMethods(env, "com/android/server/uhf/UhfSerialTransport", gMethods,
+-                                     NELEM(gMethods));
+-}
+-
+-}  // namespace android
+-- 
+2.34.1
+

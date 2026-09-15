@@ -1,0 +1,3259 @@
+From 66d0c387f40b3d14bc35349e1e565151b78b55f7 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 09:32:26 +0200
+Subject: [PATCH 2/4] uhf: add AIDL surface, UhfManager/UhfSession API,
+ UhfService, JNI transport scaffold
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Completes the Phase 1 vertical slice on top of the previously-committed
+protocol codec and session arbiter:
+
+Framework (android.hardware.uhf, all @SystemApi/@hide per SRS §5):
+- IUhfService/IUhfTagCallback/IUhfStateCallback AIDL, scoped to Phase 1
+  (§4.1-4.8: lifecycle, identity, region, power, antennas, polled
+  inventory, streaming — tag memory/security/EAS/peripherals are later
+  phases and need no change here when they land, per §5.3's design goal).
+- UhfManager/UhfSession/TagCallback client API matching §4's code samples,
+  with ServiceSpecificException -> UhfException translated once, centrally.
+- Parcelables: UhfDeviceInfo, UhfReaderInfo, UhfTag, InventoryParams,
+  StreamParams, StreamStats, plus UhfException's ERROR_* constants.
+- Context.UHF_SERVICE, PackageManager.FEATURE_UHF_READER, two permissions
+  (UHF_READ normal, UHF_CONFIGURE signature|privileged — UHF_WRITE/UHF_RAW
+  deferred to the phases that implement what they gate), SystemServiceRegistry
+  and SystemServer wiring (feature-gated; NFR-C-06 falls out of the standard
+  ServiceNotFoundException path for free, verified by reading it).
+
+Services (com.android.server.uhf):
+- UhfService: Binder/permission plumbing and per-session bookkeeping
+  (stream params, stream stats, UID ownership per NFR-S-03) around
+  UhfSessionArbiter, which stays framework-independent on purpose — this
+  class is the only place android.hardware.uhf.* Parcelables get
+  translated to/from the wire-codec types, so the arbiter's 74 host tests
+  keep working without a framework build.
+- UhfSessionArbiter: added getReaderInfo() (0x21) and inventory() (0x01,
+  routed through the same stop/apply/restart path as FR-STR-13) plus
+  isAntennaCheckEnabled()/isTransportOpen(), with 9 new tests.
+- UhfSerialTransport + JNI scaffold: NOT built or run — no framework build
+  attempted, no reader attached to this environment. The pump loop reuses
+  UhfProtocol.scan()/scanWithStallRecovery() directly rather than
+  reimplementing frame handling, so what runs through it is the tested
+  code; only the termios/JNI plumbing itself is unverified. Native lib
+  registration (services/core/jni/onload.cpp, Android.bp) intentionally
+  not touched — out of scope for this pass, flagged rather than guessed at.
+- SettingsRegionStore: FR-LC-09's persistence via Settings.Global,
+  independent of reading the region back from the reader.
+
+device/rockchip/rk3576/rk3576_u and device/rockchip/common in separate
+commits apply the SRS Rev B ueventd/product-scoping fix this series'
+review found.
+
+Manual cross-check performed in lieu of a compiler (none of this compiles
+without a full framework build): every IUhfService.aidl method has a
+matching BinderService override and a matching UhfManager/UhfSession call
+site; every UhfSessionArbiter method UhfService calls exists with a
+matching signature. One real gap caught this way and fixed:
+UhfSessionArbiter had no isAntennaCheckEnabled() getter even though
+UhfService called it — added, with a test.
+
+74/74 host tests still pass (UhfProtocol + UhfSessionArbiter, unaffected
+by anything in this commit since it depends on the arbiter, not the
+reverse).
+
+Not yet done: hardware/rockchip/uhf/ AIDL HAL (Phase 2, per SRS §3.2's
+phased alternative this whole patch deliberately defers), sdk/uhf-sdk/,
+cts/tests/uhf/, and any actual framework build attempt.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/app/SystemServiceRegistry.java    |  10 +
+ core/java/android/content/Context.java        |  11 +
+ .../android/content/pm/PackageManager.java    |   8 +
+ .../android/hardware/uhf/IUhfService.aidl     | 107 ++++
+ .../hardware/uhf/IUhfStateCallback.aidl       |  32 ++
+ .../android/hardware/uhf/IUhfTagCallback.aidl |  41 ++
+ .../android/hardware/uhf/InventoryParams.java | 169 ++++++
+ .../android/hardware/uhf/StreamParams.java    | 196 +++++++
+ .../android/hardware/uhf/StreamStats.java     | 109 ++++
+ .../android/hardware/uhf/TagCallback.java     |  41 ++
+ .../android/hardware/uhf/UhfDeviceInfo.java   |  85 +++
+ .../android/hardware/uhf/UhfException.java    |  55 ++
+ .../java/android/hardware/uhf/UhfManager.java | 155 ++++++
+ .../android/hardware/uhf/UhfReaderInfo.java   | 170 ++++++
+ .../java/android/hardware/uhf/UhfSession.java | 285 ++++++++++
+ core/java/android/hardware/uhf/UhfTag.java    | 128 +++++
+ core/res/AndroidManifest.xml                  |  23 +
+ .../server/uhf/SettingsRegionStore.java       |  55 ++
+ .../server/uhf/UhfSerialTransport.java        | 322 ++++++++++++
+ .../com/android/server/uhf/UhfService.java    | 497 ++++++++++++++++++
+ .../android/server/uhf/UhfSessionArbiter.java |  73 +++
+ ..._android_server_uhf_UhfSerialTransport.cpp | 171 ++++++
+ .../java/com/android/server/SystemServer.java |  17 +
+ .../server/uhf/UhfSessionArbiterTest.java     | 142 ++++-
+ 24 files changed, 2901 insertions(+), 1 deletion(-)
+ create mode 100644 core/java/android/hardware/uhf/IUhfService.aidl
+ create mode 100644 core/java/android/hardware/uhf/IUhfStateCallback.aidl
+ create mode 100644 core/java/android/hardware/uhf/IUhfTagCallback.aidl
+ create mode 100644 core/java/android/hardware/uhf/InventoryParams.java
+ create mode 100644 core/java/android/hardware/uhf/StreamParams.java
+ create mode 100644 core/java/android/hardware/uhf/StreamStats.java
+ create mode 100644 core/java/android/hardware/uhf/TagCallback.java
+ create mode 100644 core/java/android/hardware/uhf/UhfDeviceInfo.java
+ create mode 100644 core/java/android/hardware/uhf/UhfException.java
+ create mode 100644 core/java/android/hardware/uhf/UhfManager.java
+ create mode 100644 core/java/android/hardware/uhf/UhfReaderInfo.java
+ create mode 100644 core/java/android/hardware/uhf/UhfSession.java
+ create mode 100644 core/java/android/hardware/uhf/UhfTag.java
+ create mode 100644 services/core/java/com/android/server/uhf/SettingsRegionStore.java
+ create mode 100644 services/core/java/com/android/server/uhf/UhfSerialTransport.java
+ create mode 100644 services/core/java/com/android/server/uhf/UhfService.java
+ create mode 100644 services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp
+
+diff --git a/core/java/android/app/SystemServiceRegistry.java b/core/java/android/app/SystemServiceRegistry.java
+index 565226d0..b1124716 100644
+--- a/core/java/android/app/SystemServiceRegistry.java
++++ b/core/java/android/app/SystemServiceRegistry.java
+@@ -114,6 +114,8 @@ import android.hardware.lights.LightsManager;
+ import android.hardware.lights.SystemLightsManager;
+ import android.hardware.location.ContextHubManager;
+ import android.hardware.radio.RadioManager;
++import android.hardware.uhf.IUhfService;
++import android.hardware.uhf.UhfManager;
+ import android.hardware.usb.IUsbManager;
+ import android.hardware.usb.UsbManager;
+ import android.health.connect.HealthServicesInitializer;
+@@ -717,6 +719,14 @@ public final class SystemServiceRegistry {
+                 return new UsbManager(ctx, IUsbManager.Stub.asInterface(b));
+             }});
+ 
++        registerService(Context.UHF_SERVICE, UhfManager.class,
++                new CachedServiceFetcher<UhfManager>() {
++            @Override
++            public UhfManager createService(ContextImpl ctx) throws ServiceNotFoundException {
++                IBinder b = ServiceManager.getServiceOrThrow(Context.UHF_SERVICE);
++                return new UhfManager(ctx, IUhfService.Stub.asInterface(b));
++            }});
++
+         registerService(Context.ADB_SERVICE, AdbManager.class,
+                 new CachedServiceFetcher<AdbManager>() {
+                     @Override
+diff --git a/core/java/android/content/Context.java b/core/java/android/content/Context.java
+index 2a6d84b1..637fd081 100644
+--- a/core/java/android/content/Context.java
++++ b/core/java/android/content/Context.java
+@@ -5592,6 +5592,17 @@ public abstract class Context {
+      */
+     public static final String USB_SERVICE = "usb";
+ 
++    /**
++     * Use with {@link #getSystemService(String)} to retrieve a
++     * {@link android.hardware.uhf.UhfManager} for access to a UHF RFID reader, where the device
++     * has one (see {@link android.content.pm.PackageManager#FEATURE_UHF_READER}).
++     *
++     * @see #getSystemService(String)
++     * @see android.hardware.uhf.UhfManager
++     * @hide
++     */
++    public static final String UHF_SERVICE = "uhf";
++
+     /**
+      * Use with {@link #getSystemService(String)} to retrieve a {@link
+      * Use with {@link #getSystemService} to retrieve a {@link
+diff --git a/core/java/android/content/pm/PackageManager.java b/core/java/android/content/pm/PackageManager.java
+index 43c0da6d..97b84e84 100644
+--- a/core/java/android/content/pm/PackageManager.java
++++ b/core/java/android/content/pm/PackageManager.java
+@@ -3713,6 +3713,14 @@ public abstract class PackageManager {
+     @SdkConstant(SdkConstantType.FEATURE)
+     public static final String FEATURE_UWB = "android.hardware.uwb";
+ 
++    /**
++     * Feature for {@link #getSystemAvailableFeatures} and
++     * {@link #hasSystemFeature}: The device has a UHF RFID reader (EPC Class-1 Generation-2 /
++     * ISO 18000-6C) accessible through {@link android.hardware.uhf.UhfManager}.
++     */
++    @SdkConstant(SdkConstantType.FEATURE)
++    public static final String FEATURE_UHF_READER = "android.hardware.uhf";
++
+     /**
+      * Feature for {@link #getSystemAvailableFeatures} and
+      * {@link #hasSystemFeature}: The device supports connecting to USB devices
+diff --git a/core/java/android/hardware/uhf/IUhfService.aidl b/core/java/android/hardware/uhf/IUhfService.aidl
+new file mode 100644
+index 00000000..4fad30fa
+--- /dev/null
++++ b/core/java/android/hardware/uhf/IUhfService.aidl
+@@ -0,0 +1,107 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.hardware.uhf.IUhfStateCallback;
++import android.hardware.uhf.IUhfTagCallback;
++import android.hardware.uhf.InventoryParams;
++import android.hardware.uhf.StreamParams;
++import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.UhfDeviceInfo;
++import android.hardware.uhf.UhfReaderInfo;
++import android.hardware.uhf.UhfTag;
++
++/**
++ * Binder interface behind {@code UhfManager}/{@code UhfSession}, implemented by
++ * {@code com.android.server.uhf.UhfService}. UHF-SRS-001 Phase 1 scope only (§4.1-4.8); tag
++ * memory/security/protection/EAS/peripherals/diagnostics (§4.9-4.16) are added in later phases
++ * without needing to change any method declared here.
++ *
++ * <p>Every non-oneway method here may throw {@link android.os.ServiceSpecificException} with one
++ * of {@code UhfException.ERROR_*} as its code; {@code UhfManager}/{@code UhfSession} catch it and
++ * rethrow as {@code UhfException} so app code never sees a raw Binder exception. A method that
++ * needs a session throws {@code ERROR_BUSY} if {@code sessionToken} does not identify a session
++ * this caller's UID currently holds — including if it never held one, or held one that has since
++ * been closed.
++ *
++ * @hide
++ */
++interface IUhfService {
++    // ---- §4.1 Lifecycle and connection ----
++
++    boolean isReaderAvailable();
++
++    List<UhfDeviceInfo> getReaders();
++
++    /**
++     * Opens an exclusive session (FR-LC-03). {@code clientToken} is the caller's own token, used
++     * solely so the service can register a death recipient (FR-LC-04); the returned {@link
++     * IBinder} is a distinct, service-minted session token the caller passes to every other
++     * method here.
++     */
++    IBinder openSession(in String readerId, IBinder clientToken);
++
++    void closeSession(IBinder sessionToken);
++
++    void registerStateCallback(IUhfStateCallback callback);
++
++    void unregisterStateCallback(IUhfStateCallback callback);
++
++    // ---- §4.2 Reader identity ----
++
++    UhfReaderInfo getReaderInfo(IBinder sessionToken);
++
++    // ---- §4.4 Region ----
++
++    void setRegion(IBinder sessionToken, int bandCode);
++
++    // ---- §4.5 RF power ----
++
++    void setRfPower(IBinder sessionToken, int power, boolean allowAboveSafeCeiling);
++
++    int getRfPower(IBinder sessionToken);
++
++    int getSafeRfPowerCeiling(IBinder sessionToken);
++
++    // ---- §4.6 Antennas ----
++
++    void setEnabledAntennas(IBinder sessionToken, int mask);
++
++    int getEnabledAntennas(IBinder sessionToken);
++
++    void setAntennaCheckEnabled(IBinder sessionToken, boolean enabled);
++
++    boolean isAntennaCheckEnabled(IBinder sessionToken);
++
++    // ---- §4.7 Polled inventory ----
++
++    List<UhfTag> inventory(IBinder sessionToken, in InventoryParams params);
++
++    // ---- §4.8 Streaming ----
++
++    void setStreamParams(IBinder sessionToken, in StreamParams params);
++
++    void startStreaming(IBinder sessionToken, IUhfTagCallback callback);
++
++    void stopStreaming(IBinder sessionToken);
++
++    boolean isStreaming(IBinder sessionToken);
++
++    StreamStats getStreamStats(IBinder sessionToken);
++
++    void resetStreamStats(IBinder sessionToken);
++}
+diff --git a/core/java/android/hardware/uhf/IUhfStateCallback.aidl b/core/java/android/hardware/uhf/IUhfStateCallback.aidl
+new file mode 100644
+index 00000000..00c88547
+--- /dev/null
++++ b/core/java/android/hardware/uhf/IUhfStateCallback.aidl
+@@ -0,0 +1,32 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++/**
++ * Reader presence/availability notifications, independent of any particular session. Delivered to
++ * every registered listener regardless of who (if anyone) currently holds the session — this is
++ * how an app decides whether to even try {@code openSession()} (FR-LC-01/06).
++ *
++ * @hide
++ */
++oneway interface IUhfStateCallback {
++    /**
++     * @param state one of {@code UhfManager.STATE_ABSENT}, {@code STATE_ATTACHED},
++     *     {@code STATE_READY}, {@code STATE_BUSY}, {@code STATE_ERROR}.
++     */
++    void onStateChanged(int state);
++}
+diff --git a/core/java/android/hardware/uhf/IUhfTagCallback.aidl b/core/java/android/hardware/uhf/IUhfTagCallback.aidl
+new file mode 100644
+index 00000000..7e944abe
+--- /dev/null
++++ b/core/java/android/hardware/uhf/IUhfTagCallback.aidl
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.hardware.uhf.UhfTag;
++
++/**
++ * Streaming tag delivery, from {@code UhfService} to one {@code UhfManager} client.
++ *
++ * {@code oneway}: per UHF-SRS-001 §3.3, the HAL pump thread must never block on a slow client, and
++ * {@code UhfService}'s dispatch to each registered client must not block on any other client
++ * either. A one-way callback is what makes that true at the Binder layer; {@code UhfService} is
++ * still responsible for FR-STR-11 (dropping whole batches for a client that cannot keep up) since
++ * {@code oneway} alone only prevents blocking, not unbounded queuing.
++ *
++ * @hide
++ */
++oneway interface IUhfTagCallback {
++    /** One batch of tag reads, per UHF-SRS-001 §3.3's 50ms/64-tag batching rule. */
++    void onTagsRead(in List<UhfTag> batch);
++
++    /** The stream ended abnormally; {@code errorCode} is one of {@code UhfException.ERROR_*}. */
++    void onStreamError(int errorCode, String message);
++
++    /** FR-STR-11: this many whole batches were dropped because this client fell behind. */
++    void onBatchesDropped(int count);
++}
+diff --git a/core/java/android/hardware/uhf/InventoryParams.java b/core/java/android/hardware/uhf/InventoryParams.java
+new file mode 100644
+index 00000000..b745d87f
+--- /dev/null
++++ b/core/java/android/hardware/uhf/InventoryParams.java
+@@ -0,0 +1,169 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * Parameters for one {@link UhfSession#inventory(InventoryParams)} round (FR-INV-04/05).
++ * Defaults (Q=4, session S0, no explicit antenna/target) match {@link UhfSession#inventory()}.
++ *
++ * <p>Per FR-INV-05, {@code antenna}, {@code target} and {@code scanTimeMs} travel together or not
++ * at all — the reader rejects a partial set. {@link #hasAntennaTargetScanTime()} tells the service
++ * which case this instance is; the {@link Builder} enforces it can only produce one or the other.
++ *
++ * @hide
++ */
++@SystemApi
++public final class InventoryParams implements Parcelable {
++
++    public static final int SESSION_S0 = 0;
++    public static final int SESSION_S1 = 1;
++    public static final int SESSION_S2 = 2;
++    public static final int SESSION_S3 = 3;
++
++    public static final int TARGET_A = 0;
++    public static final int TARGET_B = 1;
++
++    private final int mQValue;
++    private final int mSession;
++    private final boolean mHasAntennaTargetScanTime;
++    private final int mAntenna;
++    private final int mTarget;
++    private final int mScanTimeMs;
++
++    private InventoryParams(Builder b) {
++        mQValue = b.mQValue;
++        mSession = b.mSession;
++        mHasAntennaTargetScanTime = b.mHasAntennaTargetScanTime;
++        mAntenna = b.mAntenna;
++        mTarget = b.mTarget;
++        mScanTimeMs = b.mScanTimeMs;
++    }
++
++    public int getQValue() {
++        return mQValue;
++    }
++
++    public int getSession() {
++        return mSession;
++    }
++
++    /** FR-INV-05: whether {@link #getAntenna()}/{@link #getTarget()}/{@link #getScanTimeMs()}
++     * are populated. When {@code false} the reader's currently configured antenna mask, its
++     * default target, and its currently configured scan time apply instead. */
++    public boolean hasAntennaTargetScanTime() {
++        return mHasAntennaTargetScanTime;
++    }
++
++    public int getAntenna() {
++        return mAntenna;
++    }
++
++    public int getTarget() {
++        return mTarget;
++    }
++
++    public int getScanTimeMs() {
++        return mScanTimeMs;
++    }
++
++    /** Builder for {@link InventoryParams}. */
++    public static final class Builder {
++        private int mQValue = 4;
++        private int mSession = SESSION_S0;
++        private boolean mHasAntennaTargetScanTime;
++        private int mAntenna = 1;
++        private int mTarget = TARGET_A;
++        private int mScanTimeMs = 1000;
++
++        /** @param q 0-15. */
++        @NonNull
++        public Builder setQValue(int q) {
++            if (q < 0 || q > 15) {
++                throw new IllegalArgumentException("qValue " + q + " outside [0,15]");
++            }
++            mQValue = q;
++            return this;
++        }
++
++        @NonNull
++        public Builder setSession(int session) {
++            mSession = session;
++            return this;
++        }
++
++        /**
++         * Sets antenna, target and scan time together, per FR-INV-05. There is no way to set only
++         * one of the three: doing so at the wire level is a request the reader rejects, so the
++         * API does not offer it as three separate setters.
++         */
++        @NonNull
++        public Builder setAntennaTargetScanTime(int antennaPort, int target, int scanTimeMs) {
++            mHasAntennaTargetScanTime = true;
++            mAntenna = antennaPort;
++            mTarget = target;
++            mScanTimeMs = scanTimeMs;
++            return this;
++        }
++
++        @NonNull
++        public InventoryParams build() {
++            return new InventoryParams(this);
++        }
++    }
++
++    private InventoryParams(Parcel in) {
++        mQValue = in.readInt();
++        mSession = in.readInt();
++        mHasAntennaTargetScanTime = in.readBoolean();
++        mAntenna = in.readInt();
++        mTarget = in.readInt();
++        mScanTimeMs = in.readInt();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeInt(mQValue);
++        dest.writeInt(mSession);
++        dest.writeBoolean(mHasAntennaTargetScanTime);
++        dest.writeInt(mAntenna);
++        dest.writeInt(mTarget);
++        dest.writeInt(mScanTimeMs);
++    }
++
++    @NonNull
++    public static final Creator<InventoryParams> CREATOR = new Creator<InventoryParams>() {
++        @Override
++        public InventoryParams createFromParcel(Parcel in) {
++            return new InventoryParams(in);
++        }
++
++        @Override
++        public InventoryParams[] newArray(int size) {
++            return new InventoryParams[size];
++        }
++    };
++}
+diff --git a/core/java/android/hardware/uhf/StreamParams.java b/core/java/android/hardware/uhf/StreamParams.java
+new file mode 100644
+index 00000000..18cb5508
+--- /dev/null
++++ b/core/java/android/hardware/uhf/StreamParams.java
+@@ -0,0 +1,196 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * Parameters for {@link UhfSession#setStreamParams} / {@link UhfSession#startStreaming}
++ * (FR-STR-03/04/05). Deliberately has no scan-time field: FR-STR-12 / the §2.4 measured note
++ * ("scan time has no effect in real-time mode") means offering one here would document a knob
++ * that does nothing.
++ *
++ * @hide
++ */
++@SystemApi
++public final class StreamParams implements Parcelable {
++    private final int mReadPauseMs;
++    private final int mFilterTimeMs;
++    private final int mQValue;
++    private final int mSession;
++    private final int mBatchWindowMs;
++    private final int mMaxBatchSize;
++    private final boolean mUniqueOnly;
++
++    private StreamParams(Builder b) {
++        mReadPauseMs = b.mReadPauseMs;
++        mFilterTimeMs = b.mFilterTimeMs;
++        mQValue = b.mQValue;
++        mSession = b.mSession;
++        mBatchWindowMs = b.mBatchWindowMs;
++        mMaxBatchSize = b.mMaxBatchSize;
++        mUniqueOnly = b.mUniqueOnly;
++    }
++
++    public int getReadPauseMs() {
++        return mReadPauseMs;
++    }
++
++    /** FR-STR-05: 0 (the default) reports every sighting; enabling filtering is an explicit choice. */
++    public int getFilterTimeMs() {
++        return mFilterTimeMs;
++    }
++
++    public int getQValue() {
++        return mQValue;
++    }
++
++    public int getSession() {
++        return mSession;
++    }
++
++    /** FR-STR-03: the batch flushes on whichever of this or {@link #getMaxBatchSize()} is first. */
++    public int getBatchWindowMs() {
++        return mBatchWindowMs;
++    }
++
++    public int getMaxBatchSize() {
++        return mMaxBatchSize;
++    }
++
++    /** FR-STR-09: framework-side dedup by first-sighting-per-EPC, not the reader's own filter. */
++    public boolean isUniqueOnly() {
++        return mUniqueOnly;
++    }
++
++    /** Builder for {@link StreamParams}. */
++    public static final class Builder {
++        private int mReadPauseMs = 0;
++        private int mFilterTimeMs = 0;
++        private int mQValue = 4;
++        private int mSession = InventoryParams.SESSION_S0;
++        private int mBatchWindowMs = 50;
++        private int mMaxBatchSize = 64;
++        private boolean mUniqueOnly = false;
++
++        @NonNull
++        public Builder setReadPauseMs(int ms) {
++            requireNonNegative(ms, "readPauseMs");
++            mReadPauseMs = ms;
++            return this;
++        }
++
++        @NonNull
++        public Builder setFilterTimeMs(int ms) {
++            requireNonNegative(ms, "filterTimeMs");
++            mFilterTimeMs = ms;
++            return this;
++        }
++
++        @NonNull
++        public Builder setQValue(int q) {
++            if (q < 0 || q > 15) {
++                throw new IllegalArgumentException("qValue " + q + " outside [0,15]");
++            }
++            mQValue = q;
++            return this;
++        }
++
++        @NonNull
++        public Builder setSession(int session) {
++            mSession = session;
++            return this;
++        }
++
++        @NonNull
++        public Builder setBatchWindowMs(int ms) {
++            if (ms <= 0) {
++                throw new IllegalArgumentException("batchWindowMs must be positive, was " + ms);
++            }
++            mBatchWindowMs = ms;
++            return this;
++        }
++
++        @NonNull
++        public Builder setMaxBatchSize(int n) {
++            if (n <= 0) {
++                throw new IllegalArgumentException("maxBatchSize must be positive, was " + n);
++            }
++            mMaxBatchSize = n;
++            return this;
++        }
++
++        @NonNull
++        public Builder setUniqueOnly(boolean uniqueOnly) {
++            mUniqueOnly = uniqueOnly;
++            return this;
++        }
++
++        @NonNull
++        public StreamParams build() {
++            return new StreamParams(this);
++        }
++
++        private static void requireNonNegative(int value, String name) {
++            if (value < 0) {
++                throw new IllegalArgumentException(name + " must be >= 0, was " + value);
++            }
++        }
++    }
++
++    private StreamParams(Parcel in) {
++        mReadPauseMs = in.readInt();
++        mFilterTimeMs = in.readInt();
++        mQValue = in.readInt();
++        mSession = in.readInt();
++        mBatchWindowMs = in.readInt();
++        mMaxBatchSize = in.readInt();
++        mUniqueOnly = in.readBoolean();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeInt(mReadPauseMs);
++        dest.writeInt(mFilterTimeMs);
++        dest.writeInt(mQValue);
++        dest.writeInt(mSession);
++        dest.writeInt(mBatchWindowMs);
++        dest.writeInt(mMaxBatchSize);
++        dest.writeBoolean(mUniqueOnly);
++    }
++
++    @NonNull
++    public static final Creator<StreamParams> CREATOR = new Creator<StreamParams>() {
++        @Override
++        public StreamParams createFromParcel(Parcel in) {
++            return new StreamParams(in);
++        }
++
++        @Override
++        public StreamParams[] newArray(int size) {
++            return new StreamParams[size];
++        }
++    };
++}
+diff --git a/core/java/android/hardware/uhf/StreamStats.java b/core/java/android/hardware/uhf/StreamStats.java
+new file mode 100644
+index 00000000..66b48ef3
+--- /dev/null
++++ b/core/java/android/hardware/uhf/StreamStats.java
+@@ -0,0 +1,109 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * Streaming counters (FR-STR-10). {@link #getElapsedMillis()} is measured from the first
++ * delivered read, never from the {@code startStreaming()} call — UHF-SRS-001 §3.3/§4.8 document
++ * mode-entry as costing five to ten seconds of command round trips before the first tag arrives,
++ * and a rate computed from the call instead of the first read understated a real ~50 reads/sec
++ * link as ~24. {@link UhfSession#resetStreamStats()} resets both the counters and this time base
++ * together, for the same reason: resetting one without the other drifts the rate upward across
++ * repeated measurements.
++ *
++ * @hide
++ */
++@SystemApi
++public final class StreamStats implements Parcelable {
++    private final long mUniqueTagCount;
++    private final long mTotalReadCount;
++    private final double mReadsPerSecond;
++    private final long mDroppedBatchCount;
++    private final long mElapsedMillis;
++
++    /** @hide */
++    public StreamStats(long uniqueTagCount, long totalReadCount, double readsPerSecond,
++            long droppedBatchCount, long elapsedMillis) {
++        mUniqueTagCount = uniqueTagCount;
++        mTotalReadCount = totalReadCount;
++        mReadsPerSecond = readsPerSecond;
++        mDroppedBatchCount = droppedBatchCount;
++        mElapsedMillis = elapsedMillis;
++    }
++
++    public long getUniqueTagCount() {
++        return mUniqueTagCount;
++    }
++
++    public long getTotalReadCount() {
++        return mTotalReadCount;
++    }
++
++    public double getReadsPerSecond() {
++        return mReadsPerSecond;
++    }
++
++    /** FR-STR-11: whole batches dropped for this client because it fell behind. */
++    public long getDroppedBatchCount() {
++        return mDroppedBatchCount;
++    }
++
++    /** Milliseconds since the first delivered read, not since {@code startStreaming()}. */
++    public long getElapsedMillis() {
++        return mElapsedMillis;
++    }
++
++    private StreamStats(Parcel in) {
++        mUniqueTagCount = in.readLong();
++        mTotalReadCount = in.readLong();
++        mReadsPerSecond = in.readDouble();
++        mDroppedBatchCount = in.readLong();
++        mElapsedMillis = in.readLong();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeLong(mUniqueTagCount);
++        dest.writeLong(mTotalReadCount);
++        dest.writeDouble(mReadsPerSecond);
++        dest.writeLong(mDroppedBatchCount);
++        dest.writeLong(mElapsedMillis);
++    }
++
++    @NonNull
++    public static final Creator<StreamStats> CREATOR = new Creator<StreamStats>() {
++        @Override
++        public StreamStats createFromParcel(Parcel in) {
++            return new StreamStats(in);
++        }
++
++        @Override
++        public StreamStats[] newArray(int size) {
++            return new StreamStats[size];
++        }
++    };
++}
+diff --git a/core/java/android/hardware/uhf/TagCallback.java b/core/java/android/hardware/uhf/TagCallback.java
+new file mode 100644
+index 00000000..ad150af4
+--- /dev/null
++++ b/core/java/android/hardware/uhf/TagCallback.java
+@@ -0,0 +1,41 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++
++import java.util.List;
++
++/**
++ * Receives batches from {@link UhfSession#startStreaming}. Every method is invoked on the
++ * {@link java.util.concurrent.Executor} passed to {@code startStreaming}, never on a Binder
++ * thread directly.
++ *
++ * @hide
++ */
++@SystemApi
++public interface TagCallback {
++    /** One batch, per UHF-SRS-001 §3.3's batching rule — never one call per tag. */
++    void onTagsRead(@NonNull List<UhfTag> batch);
++
++    /** The stream ended abnormally; see {@link UhfException} for {@code errorCode}'s meaning. */
++    void onStreamError(int errorCode, @NonNull String message);
++
++    /** FR-STR-11: this many whole batches were dropped because this app fell behind. */
++    void onBatchesDropped(int count);
++}
+diff --git a/core/java/android/hardware/uhf/UhfDeviceInfo.java b/core/java/android/hardware/uhf/UhfDeviceInfo.java
+new file mode 100644
+index 00000000..8dcff03d
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfDeviceInfo.java
+@@ -0,0 +1,85 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * A stable identifier for one attached reader, as returned by {@link UhfManager#getReaders()}
++ * (FR-LC-02). Most devices in scope for UHF-SRS-001 have exactly one reader, in which case
++ * {@link UhfManager#openSession()} (no id) is simpler than looking this up first.
++ *
++ * @hide
++ */
++@SystemApi
++public final class UhfDeviceInfo implements Parcelable {
++    private final String mReaderId;
++    private final String mDevicePath;
++
++    /** @hide */
++    public UhfDeviceInfo(@NonNull String readerId, @NonNull String devicePath) {
++        mReaderId = readerId;
++        mDevicePath = devicePath;
++    }
++
++    /** Opaque, stable identifier to pass to {@link UhfManager#openSession(String)}. */
++    @NonNull
++    public String getReaderId() {
++        return mReaderId;
++    }
++
++    /**
++     * The underlying transport path (e.g. {@code /dev/ttyUSB0}), exposed for diagnostics only.
++     * Not guaranteed stable across a reconnect; use {@link #getReaderId()} to address a reader.
++     */
++    @NonNull
++    public String getDevicePath() {
++        return mDevicePath;
++    }
++
++    private UhfDeviceInfo(Parcel in) {
++        mReaderId = in.readString();
++        mDevicePath = in.readString();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeString(mReaderId);
++        dest.writeString(mDevicePath);
++    }
++
++    @NonNull
++    public static final Creator<UhfDeviceInfo> CREATOR = new Creator<UhfDeviceInfo>() {
++        @Override
++        public UhfDeviceInfo createFromParcel(Parcel in) {
++            return new UhfDeviceInfo(in);
++        }
++
++        @Override
++        public UhfDeviceInfo[] newArray(int size) {
++            return new UhfDeviceInfo[size];
++        }
++    };
++}
+diff --git a/core/java/android/hardware/uhf/UhfException.java b/core/java/android/hardware/uhf/UhfException.java
+new file mode 100644
+index 00000000..031bf0eb
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfException.java
+@@ -0,0 +1,55 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++
++/**
++ * Thrown for a reader/link-level failure, carrying one of the stable {@code ERROR_*} codes from
++ * UHF-SRS-001 §5.5. Wire status bytes never reach the caller directly — {@code UhfService} maps
++ * them once, centrally, so app code (and this class's own callers) never need to know the wire
++ * protocol. Two statuses are deliberately <em>not</em> represented here at all: {@code 0x01}
++ * (inventory complete) and {@code 0xFB} (no operable tags) are ordinary outcomes, not exceptions
++ * (FR-INV-08) — an API that throws on an empty field forces every caller into a try/catch around
++ * a non-error.
++ *
++ * @hide
++ */
++@SystemApi
++public final class UhfException extends Exception {
++
++    public static final int ERROR_BUFFER_FULL = 1;
++    public static final int ERROR_ANTENNA_FAULT = 2;
++    public static final int ERROR_COMMAND_REJECTED = 3;
++    public static final int ERROR_PROTOCOL = 4;
++    public static final int ERROR_INVALID_PARAMETER = 5;
++    public static final int ERROR_TIMEOUT = 6;
++    public static final int ERROR_DEVICE_LOST = 7;
++    public static final int ERROR_BUSY = 8;
++
++    private final int mErrorCode;
++
++    public UhfException(int errorCode, @NonNull String message) {
++        super(message);
++        mErrorCode = errorCode;
++    }
++
++    public int getErrorCode() {
++        return mErrorCode;
++    }
++}
+diff --git a/core/java/android/hardware/uhf/UhfManager.java b/core/java/android/hardware/uhf/UhfManager.java
+new file mode 100644
+index 00000000..96b9a431
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfManager.java
+@@ -0,0 +1,155 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SystemApi;
++import android.annotation.SystemService;
++import android.content.Context;
++import android.os.Binder;
++import android.os.IBinder;
++import android.os.RemoteException;
++import android.os.ServiceSpecificException;
++import android.util.Log;
++
++import java.util.List;
++import java.util.concurrent.Executor;
++
++/**
++ * Entry point for the platform's UHF RFID reader (UHF-SRS-001). Obtain with
++ * {@code context.getSystemService(UhfManager.class)}, or {@code null} on a device without
++ * {@link android.content.pm.PackageManager#FEATURE_UHF_READER} (NFR-C-06) — this class never
++ * throws for that reason, so callers do not need a try/catch just to probe for the feature.
++ *
++ * <p>Nothing here touches the wire protocol or even knows a reader is a serial device; that is
++ * {@code UhfService}'s and (from Phase 2) the vendor HAL's job (§3.2/§3.4). This class is
++ * intentionally thin: parameter validation that can be done without a session, and marshalling
++ * callbacks onto the caller's {@link Executor} — see SDK-03, which holds the SDK to the same
++ * standard for the same reason.
++ *
++ * @hide
++ */
++@SystemApi
++@SystemService(Context.UHF_SERVICE)
++public final class UhfManager {
++    private static final String TAG = "UhfManager";
++
++    public static final int STATE_ABSENT = 0;
++    public static final int STATE_ATTACHED = 1;
++    public static final int STATE_READY = 2;
++    public static final int STATE_BUSY = 3;
++    public static final int STATE_ERROR = 4;
++
++    private final Context mContext;
++    private final IUhfService mService;
++
++    /** @hide */
++    public UhfManager(@NonNull Context context, @NonNull IUhfService service) {
++        mContext = context;
++        mService = service;
++    }
++
++    /** FR-LC-01: distinguishes "no hardware" from "hardware present but unavailable" only in
++     * that the latter is also {@code false} here — see {@link StateCallback} for the distinction
++     * once a session shows the reader is {@link #STATE_ATTACHED} but not yet {@link #STATE_READY}. */
++    public boolean isReaderAvailable() {
++        try {
++            return mService.isReaderAvailable();
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-LC-02. Most devices have exactly one reader; {@link #openSession()} skips this call. */
++    @NonNull
++    public List<UhfDeviceInfo> getReaders() {
++        try {
++            return mService.getReaders();
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Opens a session on a specific reader (FR-LC-03), or the default reader if
++     * {@code readerId} is {@code null}. Throws {@link UhfException} with
++     * {@link UhfException#ERROR_BUSY} if another client already holds it. */
++    @NonNull
++    public UhfSession openSession(@Nullable String readerId) throws UhfException {
++        IBinder clientToken = new Binder();
++        try {
++            IBinder sessionToken = mService.openSession(readerId, clientToken);
++            return new UhfSession(mService, sessionToken);
++        } catch (ServiceSpecificException e) {
++            throw new UhfException(e.errorCode, e.getMessage());
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Opens a session on the device's default (usually only) reader. */
++    @NonNull
++    public UhfSession openSession() throws UhfException {
++        return openSession(/* readerId= */ null);
++    }
++
++    /**
++     * Registers for {@link #STATE_ABSENT}/{@code ATTACHED}/{@code READY}/{@code BUSY}/
++     * {@code ERROR} notifications (FR-LC-06/07), delivered on {@code executor}. Independent of
++     * whether this caller holds a session — this is how a caller decides whether to try
++     * {@link #openSession} at all, or reacts to another client's session ending.
++     */
++    public void registerStateCallback(@NonNull Executor executor, @NonNull StateCallback callback) {
++        IUhfStateCallback wrapper = new IUhfStateCallback.Stub() {
++            @Override
++            public void onStateChanged(int state) {
++                executor.execute(() -> callback.onStateChanged(state));
++            }
++        };
++        callback.mWrapper = wrapper;
++        try {
++            mService.registerStateCallback(wrapper);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void unregisterStateCallback(@NonNull StateCallback callback) {
++        IUhfStateCallback wrapper = callback.mWrapper;
++        if (wrapper == null) {
++            return; // never registered, or already unregistered; not an error either way
++        }
++        try {
++            mService.unregisterStateCallback(wrapper);
++        } catch (RemoteException e) {
++            Log.w(TAG, "unregisterStateCallback: service already gone", e);
++        }
++        callback.mWrapper = null;
++    }
++
++    /**
++     * Reader presence/availability listener for {@link #registerStateCallback}.
++     *
++     * @hide
++     */
++    @SystemApi
++    public abstract static class StateCallback {
++        private volatile IUhfStateCallback mWrapper;
++
++        public abstract void onStateChanged(int state);
++    }
++}
+diff --git a/core/java/android/hardware/uhf/UhfReaderInfo.java b/core/java/android/hardware/uhf/UhfReaderInfo.java
+new file mode 100644
+index 00000000..07607441
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfReaderInfo.java
+@@ -0,0 +1,170 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * Reader identity and current configuration, per UHF-SRS-001 FR-INF-01. Obtained from
++ * {@link UhfSession#getReaderInfo()}; the service caches it for the life of a session and
++ * invalidates the cache on any configuration write (FR-INF-05), so reading it in a loop does not
++ * generate serial traffic.
++ *
++ * @hide
++ */
++@SystemApi
++public final class UhfReaderInfo implements Parcelable {
++    private final String mFirmwareVersion;
++    private final int mModelType;
++    private final boolean mSupportsIso18000_6c;
++    private final boolean mSupportsIso18000_6b;
++    private final int mBandCode;
++    private final String mBandName;
++    private final double mMinFrequencyMhz;
++    private final double mMaxFrequencyMhz;
++    private final int mMaxRfPower;
++    private final int mScanTimeMs;
++    private final int mAntennaMask;
++    private final boolean mAntennaCheckEnabled;
++
++    /** @hide */
++    public UhfReaderInfo(@NonNull String firmwareVersion, int modelType,
++            boolean supportsIso18000_6c, boolean supportsIso18000_6b, int bandCode,
++            @NonNull String bandName, double minFrequencyMhz, double maxFrequencyMhz,
++            int maxRfPower, int scanTimeMs, int antennaMask, boolean antennaCheckEnabled) {
++        mFirmwareVersion = firmwareVersion;
++        mModelType = modelType;
++        mSupportsIso18000_6c = supportsIso18000_6c;
++        mSupportsIso18000_6b = supportsIso18000_6b;
++        mBandCode = bandCode;
++        mBandName = bandName;
++        mMinFrequencyMhz = minFrequencyMhz;
++        mMaxFrequencyMhz = maxFrequencyMhz;
++        mMaxRfPower = maxRfPower;
++        mScanTimeMs = scanTimeMs;
++        mAntennaMask = antennaMask;
++        mAntennaCheckEnabled = antennaCheckEnabled;
++    }
++
++    /** e.g. {@code "1.24"}. */
++    @NonNull
++    public String getFirmwareVersion() {
++        return mFirmwareVersion;
++    }
++
++    public int getModelType() {
++        return mModelType;
++    }
++
++    public boolean supportsIso18000_6c() {
++        return mSupportsIso18000_6c;
++    }
++
++    /** Always {@code false} for this reader family; kept for API symmetry with §1.2's scope note. */
++    public boolean supportsIso18000_6b() {
++        return mSupportsIso18000_6b;
++    }
++
++    /** Raw 4-bit band code; see {@link #getBandName()} for the resolved region. */
++    public int getBandCode() {
++        return mBandCode;
++    }
++
++    /** e.g. {@code "EU"}; empty string if {@link #getBandCode()} is not one of §4.4's rows. */
++    @NonNull
++    public String getBandName() {
++        return mBandName;
++    }
++
++    public double getMinFrequencyMhz() {
++        return mMinFrequencyMhz;
++    }
++
++    public double getMaxFrequencyMhz() {
++        return mMaxFrequencyMhz;
++    }
++
++    /** FR-PWR-02: the ceiling {@link UhfSession#setRfPower} enforces regardless of the safe cap. */
++    public int getMaxRfPower() {
++        return mMaxRfPower;
++    }
++
++    public int getScanTimeMs() {
++        return mScanTimeMs;
++    }
++
++    /** Bit 0 = antenna port 1 .. bit 3 = port 4 (FR-ANT-01). */
++    public int getAntennaMask() {
++        return mAntennaMask;
++    }
++
++    public boolean isAntennaCheckEnabled() {
++        return mAntennaCheckEnabled;
++    }
++
++    private UhfReaderInfo(Parcel in) {
++        mFirmwareVersion = in.readString();
++        mModelType = in.readInt();
++        mSupportsIso18000_6c = in.readBoolean();
++        mSupportsIso18000_6b = in.readBoolean();
++        mBandCode = in.readInt();
++        mBandName = in.readString();
++        mMinFrequencyMhz = in.readDouble();
++        mMaxFrequencyMhz = in.readDouble();
++        mMaxRfPower = in.readInt();
++        mScanTimeMs = in.readInt();
++        mAntennaMask = in.readInt();
++        mAntennaCheckEnabled = in.readBoolean();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeString(mFirmwareVersion);
++        dest.writeInt(mModelType);
++        dest.writeBoolean(mSupportsIso18000_6c);
++        dest.writeBoolean(mSupportsIso18000_6b);
++        dest.writeInt(mBandCode);
++        dest.writeString(mBandName);
++        dest.writeDouble(mMinFrequencyMhz);
++        dest.writeDouble(mMaxFrequencyMhz);
++        dest.writeInt(mMaxRfPower);
++        dest.writeInt(mScanTimeMs);
++        dest.writeInt(mAntennaMask);
++        dest.writeBoolean(mAntennaCheckEnabled);
++    }
++
++    @NonNull
++    public static final Creator<UhfReaderInfo> CREATOR = new Creator<UhfReaderInfo>() {
++        @Override
++        public UhfReaderInfo createFromParcel(Parcel in) {
++            return new UhfReaderInfo(in);
++        }
++
++        @Override
++        public UhfReaderInfo[] newArray(int size) {
++            return new UhfReaderInfo[size];
++        }
++    };
++}
+diff --git a/core/java/android/hardware/uhf/UhfSession.java b/core/java/android/hardware/uhf/UhfSession.java
+new file mode 100644
+index 00000000..9c350143
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfSession.java
+@@ -0,0 +1,285 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.SystemApi;
++import android.os.IBinder;
++import android.os.RemoteException;
++import android.os.ServiceSpecificException;
++import android.util.Log;
++
++import java.util.List;
++import java.util.concurrent.Executor;
++
++/**
++ * An exclusive, single-reader session (FR-LC-03), obtained from {@link UhfManager#openSession}.
++ * {@link AutoCloseable}: closing it (directly, or via try-with-resources as in §5.1's example)
++ * releases the reader and returns it to answering mode, mirroring what
++ * {@code UhfService}/{@code UhfSessionArbiter} already does automatically if this process dies
++ * instead (FR-LC-04) — a graceful close and a crash converge on the same reader-side state.
++ *
++ * <p>Every method here requires the session still be open; calling one after {@link #close()} (or
++ * after this process's Binder connection to {@code UhfService} has otherwise invalidated the
++ * token) surfaces as {@link UhfException} with {@link UhfException#ERROR_BUSY} from the service,
++ * the same as it would for a second, unrelated caller — this class does not add a separate local
++ * "already closed" exception type, so callers have exactly one failure mode to handle rather than
++ * two that mean almost the same thing.
++ *
++ * @hide
++ */
++@SystemApi
++public final class UhfSession implements AutoCloseable {
++    private static final String TAG = "UhfSession";
++
++    private final IUhfService mService;
++    private final IBinder mSessionToken;
++    private volatile boolean mClosed;
++    private volatile IUhfTagCallback mStreamWrapper;
++
++    /** @hide */
++    public UhfSession(@NonNull IUhfService service, @NonNull IBinder sessionToken) {
++        mService = service;
++        mSessionToken = sessionToken;
++    }
++
++    /** Whether this session has not been {@link #close()}d locally. Does not itself confirm the
++     * service still honours the token — see the class doc. */
++    public boolean isValid() {
++        return !mClosed;
++    }
++
++    @Override
++    public void close() {
++        if (mClosed) {
++            return; // AutoCloseable convention: close() is idempotent.
++        }
++        mClosed = true;
++        try {
++            mService.closeSession(mSessionToken);
++        } catch (RemoteException e) {
++            Log.w(TAG, "close: service already gone", e);
++        }
++    }
++
++    @NonNull
++    public UhfReaderInfo getReaderInfo() throws UhfException {
++        try {
++            return mService.getReaderInfo(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void setRegion(int bandCode) throws UhfException {
++        try {
++            mService.setRegion(mSessionToken, bandCode);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Equivalent to {@code setRfPower(power, false)}. */
++    public void setRfPower(int power) throws UhfException {
++        setRfPower(power, /* allowAboveSafeCeiling= */ false);
++    }
++
++    /** FR-PWR-03: {@code allowAboveSafeCeiling} must be {@code true} to exceed
++     * {@link #getSafeRfPowerCeiling()}; see the class-level note on why this is not the default. */
++    public void setRfPower(int power, boolean allowAboveSafeCeiling) throws UhfException {
++        try {
++            mService.setRfPower(mSessionToken, power, allowAboveSafeCeiling);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public int getRfPower() throws UhfException {
++        try {
++            return mService.getRfPower(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-PWR-02: the reader's own hardware ceiling, not overridable by {@code allowAboveSafeCeiling}. */
++    public int getMaxRfPower() throws UhfException {
++        return getReaderInfo().getMaxRfPower();
++    }
++
++    public int getSafeRfPowerCeiling() throws UhfException {
++        try {
++            return mService.getSafeRfPowerCeiling(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void setEnabledAntennas(int mask) throws UhfException {
++        try {
++            mService.setEnabledAntennas(mSessionToken, mask);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public int getEnabledAntennas() throws UhfException {
++        try {
++            return mService.getEnabledAntennas(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void setAntennaCheckEnabled(boolean enabled) throws UhfException {
++        try {
++            mService.setAntennaCheckEnabled(mSessionToken, enabled);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public boolean isAntennaCheckEnabled() throws UhfException {
++        try {
++            return mService.isAntennaCheckEnabled(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** One polled inventory round with default parameters (Q=4, session S0). */
++    @NonNull
++    public List<UhfTag> inventory() throws UhfException {
++        return inventory(new InventoryParams.Builder().build());
++    }
++
++    @NonNull
++    public List<UhfTag> inventory(@NonNull InventoryParams params) throws UhfException {
++        try {
++            return mService.inventory(mSessionToken, params);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Must be called before {@link #startStreaming}; FR-STR-08 applies it the next time
++     * streaming (re)starts, not retroactively to an already-running stream. */
++    public void setStreamParams(@NonNull StreamParams params) throws UhfException {
++        try {
++            mService.setStreamParams(mSessionToken, params);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-STR-01/02: {@code callback}'s methods are invoked on {@code executor}, never on a
++     * Binder thread directly. */
++    public void startStreaming(@NonNull Executor executor, @NonNull TagCallback callback)
++            throws UhfException {
++        IUhfTagCallback wrapper = new IUhfTagCallback.Stub() {
++            @Override
++            public void onTagsRead(List<UhfTag> batch) {
++                executor.execute(() -> callback.onTagsRead(batch));
++            }
++
++            @Override
++            public void onStreamError(int errorCode, String message) {
++                executor.execute(() -> callback.onStreamError(errorCode, message));
++            }
++
++            @Override
++            public void onBatchesDropped(int count) {
++                executor.execute(() -> callback.onBatchesDropped(count));
++            }
++        };
++        try {
++            mService.startStreaming(mSessionToken, wrapper);
++            mStreamWrapper = wrapper; // only retained after a successful start
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void stopStreaming() {
++        mStreamWrapper = null;
++        try {
++            mService.stopStreaming(mSessionToken);
++        } catch (RemoteException e) {
++            Log.w(TAG, "stopStreaming: service already gone", e);
++        }
++    }
++
++    public boolean isStreaming() throws UhfException {
++        try {
++            return mService.isStreaming(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    @NonNull
++    public StreamStats getStreamStats() throws UhfException {
++        try {
++            return mService.getStreamStats(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Resets both the counters and the elapsed-time base together — see {@link StreamStats}. */
++    public void resetStreamStats() throws UhfException {
++        try {
++            mService.resetStreamStats(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    private static UhfException toUhfException(ServiceSpecificException e) {
++        return new UhfException(e.errorCode, e.getMessage());
++    }
++}
+diff --git a/core/java/android/hardware/uhf/UhfTag.java b/core/java/android/hardware/uhf/UhfTag.java
+new file mode 100644
+index 00000000..db0a4496
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfTag.java
+@@ -0,0 +1,128 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * One tag sighting: the result of {@link UhfSession#inventory()} or one entry in an
++ * {@code onTagsRead} batch. Per UHF-SRS-001's Definitions (§1.3): a tag seen ten times yields ten
++ * {@code UhfTag} reads and one unique EPC — this class deliberately does not deduplicate; that is
++ * {@code UhfSession.setStreamParams(StreamParams.Builder#setUniqueOnly)}'s job, applied in the
++ * framework, not silently baked into every read.
++ *
++ * @hide
++ */
++@SystemApi
++public final class UhfTag implements Parcelable {
++    private final byte[] mEpc;
++    private final byte[] mTid; // may be empty; getTid() returns null in that case
++    private final int mRssi;
++    private final int mAntenna;
++    private final long mTimestampNanos;
++    private final int mReadCount;
++
++    /** @hide */
++    public UhfTag(@NonNull byte[] epc, @Nullable byte[] tid, int rssi, int antenna,
++            long timestampNanos, int readCount) {
++        mEpc = epc;
++        mTid = tid;
++        mRssi = rssi;
++        mAntenna = antenna;
++        mTimestampNanos = timestampNanos;
++        mReadCount = readCount;
++    }
++
++    @NonNull
++    public byte[] getEpc() {
++        return mEpc;
++    }
++
++    @NonNull
++    public String getEpcHex() {
++        StringBuilder sb = new StringBuilder(mEpc.length * 2);
++        for (byte b : mEpc) {
++            sb.append(String.format("%02X", b));
++        }
++        return sb.toString();
++    }
++
++    /** Non-null only when FastID / EPC+TID inventory was requested and the tag supplied one. */
++    @Nullable
++    public byte[] getTid() {
++        return (mTid == null || mTid.length == 0) ? null : mTid;
++    }
++
++    public int getRssi() {
++        return mRssi;
++    }
++
++    /** The antenna port (1-4) that reported this sighting. */
++    public int getAntenna() {
++        return mAntenna;
++    }
++
++    public long getTimestampNanos() {
++        return mTimestampNanos;
++    }
++
++    /** This tag's ordinal position within the batch that delivered it; not a running total. */
++    public int getReadCount() {
++        return mReadCount;
++    }
++
++    private UhfTag(Parcel in) {
++        mEpc = in.createByteArray();
++        mTid = in.createByteArray();
++        mRssi = in.readInt();
++        mAntenna = in.readInt();
++        mTimestampNanos = in.readLong();
++        mReadCount = in.readInt();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeByteArray(mEpc);
++        dest.writeByteArray(mTid);
++        dest.writeInt(mRssi);
++        dest.writeInt(mAntenna);
++        dest.writeLong(mTimestampNanos);
++        dest.writeInt(mReadCount);
++    }
++
++    @NonNull
++    public static final Creator<UhfTag> CREATOR = new Creator<UhfTag>() {
++        @Override
++        public UhfTag createFromParcel(Parcel in) {
++            return new UhfTag(in);
++        }
++
++        @Override
++        public UhfTag[] newArray(int size) {
++            return new UhfTag[size];
++        }
++    };
++}
+diff --git a/core/res/AndroidManifest.xml b/core/res/AndroidManifest.xml
+index 77262915..7bbe3dfc 100644
+--- a/core/res/AndroidManifest.xml
++++ b/core/res/AndroidManifest.xml
+@@ -2376,6 +2376,29 @@
+     <permission android:name="android.permission.NFC_TRANSACTION_EVENT"
+       android:protectionLevel="normal" />
+ 
++    <!-- UHF-SRS-001 §5.4. Allows an application to open a session on the device's UHF RFID
++         reader and perform inventory (polled or streaming) and tag-memory reads.
++         <p>Protection level: normal
++    -->
++    <permission android:name="android.permission.UHF_READ"
++        android:protectionLevel="normal" />
++
++    <!-- UHF-SRS-001 §5.4. Allows an application to change the UHF RFID reader's regulatory
++         region, RF power (including above the safe ceiling), antenna configuration, serial
++         link settings, and peripherals. Restricted to the platform and OEM-privileged apps
++         because an incorrect region is a regulatory violation (FR-FRQ-04) and unrestricted
++         power/antenna control can brown out the reader (FR-PWR-03).
++         @hide
++         <p>Protection level: signature|privileged
++    -->
++    <permission android:name="android.permission.UHF_CONFIGURE"
++        android:protectionLevel="signature|privileged" />
++
++    <!-- UHF-SRS-001 §5.4 also defines UHF_WRITE (dangerous; tag memory writes, kill, lock) and
++         UHF_RAW (signature; raw frame passthrough and diagnostics). Both are deferred to the
++         phases that implement the operations they gate (§4.10-4.13 and §4.16 respectively,
++         SRS §10.2 Phases 3 and 5) rather than declared ahead of any code that enforces them. -->
++
+     <!-- Allows applications to receive NFC preferred payment service information.
+          <p>Protection level: normal
+     -->
+diff --git a/services/core/java/com/android/server/uhf/SettingsRegionStore.java b/services/core/java/com/android/server/uhf/SettingsRegionStore.java
+new file mode 100644
+index 00000000..77e53373
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/SettingsRegionStore.java
+@@ -0,0 +1,55 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import android.content.ContentResolver;
++import android.content.Context;
++import android.provider.Settings;
++
++/**
++ * FR-LC-09's persistence: the last successfully applied regulatory region, stored in
++ * {@link Settings.Global} rather than read back from the reader. Deliberately not a per-user
++ * setting — a UHF reader is board-level hardware regulated per device, not per {@code Settings}
++ * user profile, the same reasoning {@code Settings.Global} itself documents for its other
++ * hardware-level entries.
++ *
++ * <p>The default (EU, band code {@code 0b0100}) matches the development unit this SRS was
++ * written against (§1's meta line, §4.4's table). A real product build overrides it with the
++ * region resource {@code config_uhfDefaultRegion} (SRS §8.1 row 17) rather than hardcoding a
++ * different literal here — this class only supplies the fallback for a factory-fresh device that
++ * has never had a region explicitly set.
++ */
++final class SettingsRegionStore implements UhfSessionArbiter.RegionStore {
++    private static final String KEY_REGION_BAND_CODE = "uhf_region_band_code";
++    private static final int DEFAULT_BAND_CODE = 0b0100; // EU
++
++    private final ContentResolver mResolver;
++
++    SettingsRegionStore(Context context) {
++        mResolver = context.getContentResolver();
++    }
++
++    @Override
++    public int getPersistedRegionCode() {
++        return Settings.Global.getInt(mResolver, KEY_REGION_BAND_CODE, DEFAULT_BAND_CODE);
++    }
++
++    @Override
++    public void setPersistedRegionCode(int bandCode) {
++        Settings.Global.putInt(mResolver, KEY_REGION_BAND_CODE, bandCode);
++    }
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfSerialTransport.java b/services/core/java/com/android/server/uhf/UhfSerialTransport.java
+new file mode 100644
+index 00000000..be002583
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfSerialTransport.java
+@@ -0,0 +1,322 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import android.util.Slog;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.locks.ReentrantLock;
++
++/**
++ * Phase 1's "JNI transport" from SRS §3.2: {@code UhfService} opens {@code /dev/ttyUSB*} directly
++ * from {@code system_server} through this class rather than through a vendor HAL. It is the one
++ * piece of this patch series that genuinely cannot be verified in this environment — there is no
++ * reader attached here, so nothing below has run against real hardware or even a real tty. What
++ * <em>can</em> be, and is, verified: the frame assembly and resync logic the pump loop calls
++ * ({@link UhfProtocol#scan}/{@link UhfProtocol#scanWithStallRecovery}) is the same code exercised
++ * by {@code UhfProtocolTest}'s 37 cases — this class's job is narrowly to get bytes on and off the
++ * wire and hand them to that already-tested logic, not to reimplement any of it.
++ *
++ * <p>Everything reader-transaction-shaped funnels through {@link #transact}, called with the
++ * arbiter's lock held (see {@link UhfSessionArbiter}'s class doc on why every public method there
++ * is {@code synchronized}) — so this class does not need its own transaction-level locking, only
++ * {@link #mIoLock} guarding the native handle against a concurrent {@link #close()}.
++ */
++final class UhfSerialTransport implements UhfTransport {
++    private static final String TAG = "UhfSerialTransport";
++
++    /** FR-LNK-07's OI-05 companion: this is the interim, unnarrowed match (SRS §8.2 Rev B note).
++     * A real device may have more than one {@code ttyUSB*}; Phase 1 assumes this is the only one,
++     * consistent with the interim ueventd rule matching every {@code ttyUSB*} on this product. */
++    static final String DEVICE_PATH = "/dev/ttyUSB0";
++
++    private static final int BAUD_RATE = 115200; // FR-LNK-01
++    private static final int READ_TIMEOUT_MS = 500;
++    private static final int MAX_TRANSACT_RETRIES = 2;
++
++    static {
++        // Unverified in this environment: no build of libuhf_jni has been attempted here (would
++        // require `m` against the full framework, per this patch series' cover note). The
++        // Android.bp target this expects is added alongside this file; see its comment for what
++        // is and is not confirmed about it.
++        System.loadLibrary("uhf_jni");
++    }
++
++    private final ReentrantLock mIoLock = new ReentrantLock();
++    private long mNativeHandle; // 0 == not open
++    private volatile boolean mStreaming;
++    private Thread mPumpThread;
++
++    @Override
++    public void open() throws UhfTransportException {
++        mIoLock.lock();
++        try {
++            if (mNativeHandle != 0) {
++                return; // already open; open() is idempotent per the UhfTransport contract
++            }
++            long handle = nativeOpen(DEVICE_PATH, BAUD_RATE);
++            if (handle == 0) {
++                throw new UhfTransportException(
++                        UhfProtocol.ERROR_DEVICE_LOST, "failed to open " + DEVICE_PATH);
++            }
++            mNativeHandle = handle;
++        } finally {
++            mIoLock.unlock();
++        }
++    }
++
++    @Override
++    public void close() {
++        mIoLock.lock();
++        try {
++            if (mNativeHandle == 0) {
++                return;
++            }
++            stopStream();
++            nativeClose(mNativeHandle);
++            mNativeHandle = 0;
++        } finally {
++            mIoLock.unlock();
++        }
++    }
++
++    @Override
++    public boolean isOpen() {
++        mIoLock.lock();
++        try {
++            return mNativeHandle != 0;
++        } finally {
++            mIoLock.unlock();
++        }
++    }
++
++    @Override
++    public byte[] transact(int command, byte[] payload, int timeoutMs)
++            throws UhfTransportException {
++        byte[] frame = UhfProtocol.buildFrame(UhfProtocol.ADDRESS_BROADCAST, command, payload);
++        UhfTransportException lastFailure = null;
++        for (int attempt = 0; attempt <= MAX_TRANSACT_RETRIES; attempt++) {
++            try {
++                return transactOnce(frame, command, timeoutMs);
++            } catch (UhfTransportException e) {
++                lastFailure = e;
++                if (e.getErrorCode() != UhfProtocol.ERROR_TIMEOUT) {
++                    throw e; // only a timeout is worth retrying; a mapped reader error is final
++                }
++            }
++        }
++        throw lastFailure;
++    }
++
++    private byte[] transactOnce(byte[] frame, int expectedCommand, int timeoutMs)
++            throws UhfTransportException {
++        mIoLock.lock();
++        try {
++            requireOpen();
++            nativePurgeReceiveBuffer(mNativeHandle); // FR-LNK-08
++            nativeWrite(mNativeHandle, frame);
++
++            List<byte[]> multiFrameData = new ArrayList<>();
++            byte[] buf = new byte[4096];
++            int len = 0;
++            long deadline = System.nanoTime() + timeoutMs * 1_000_000L;
++            long lastByteAt = System.nanoTime();
++
++            while (System.nanoTime() < deadline) {
++                int n = nativeRead(mNativeHandle, buf, len, buf.length - len,
++                        (int) Math.min(READ_TIMEOUT_MS, (deadline - System.nanoTime()) / 1_000_000));
++                if (n > 0) {
++                    len += n;
++                    lastByteAt = System.nanoTime();
++                }
++                boolean stale = (System.nanoTime() - lastByteAt) > FR_LNK_05_INTER_BYTE_GAP_NANOS;
++
++                int offset = 0;
++                while (offset < len) {
++                    UhfProtocol.ScanResult r =
++                            UhfProtocol.scanWithStallRecovery(buf, offset, len - offset, stale);
++                    if (r.outcome == UhfProtocol.ScanOutcome.NEED_MORE_DATA) {
++                        break;
++                    }
++                    if (r.outcome == UhfProtocol.ScanOutcome.RESYNC) {
++                        offset += r.bytesToDiscard;
++                        continue;
++                    }
++                    // FRAME
++                    offset += r.frame.wireLength;
++                    if (!UhfProtocol.reCmdMatches(r.frame, expectedCommand)) {
++                        continue; // FR-LNK-06: e.g. an interleaved 0xEE real-time tag frame
++                    }
++                    int status = r.frame.data.length > 0
++                            ? (r.frame.data[0] & 0xFF) : UhfProtocol.STATUS_INVENTORY_COMPLETE;
++                    multiFrameData.add(r.frame.data);
++                    if (status != UhfProtocol.STATUS_MORE_FRAMES_FOLLOW) {
++                        return concat(multiFrameData); // FR-INV-02: caller sees the assembled reply
++                    }
++                    // else: FR-INV-02, keep collecting frames for this same reCmd.
++                }
++                // Compact unconsumed bytes to the front of buf for the next read.
++                if (offset > 0) {
++                    System.arraycopy(buf, offset, buf, 0, len - offset);
++                    len -= offset;
++                }
++            }
++            throw new UhfTransportException(UhfProtocol.ERROR_TIMEOUT,
++                    "no matching reply to 0x" + Integer.toHexString(expectedCommand)
++                            + " within " + timeoutMs + "ms");
++        } finally {
++            mIoLock.unlock();
++        }
++    }
++
++    private static final long FR_LNK_05_INTER_BYTE_GAP_NANOS = 15_000_000L; // 15ms
++
++    private static byte[] concat(List<byte[]> parts) {
++        int total = 0;
++        for (byte[] p : parts) total += p.length;
++        byte[] out = new byte[total];
++        int pos = 0;
++        for (byte[] p : parts) {
++            System.arraycopy(p, 0, out, pos, p.length);
++            pos += p.length;
++        }
++        return out;
++    }
++
++    @Override
++    public void startStream(StreamCallback callback) throws UhfTransportException {
++        mIoLock.lock();
++        try {
++            requireOpen();
++            if (mStreaming) {
++                return;
++            }
++            byte[] enterRealtime = UhfProtocol.buildFrame(
++                    UhfProtocol.ADDRESS_BROADCAST, 0x76, new byte[] {0x01});
++            nativeWrite(mNativeHandle, enterRealtime);
++            mStreaming = true;
++            mPumpThread = new Thread(() -> pumpLoop(callback), "UhfStreamPump");
++            mPumpThread.start();
++        } finally {
++            mIoLock.unlock();
++        }
++    }
++
++    @Override
++    public void stopStream() {
++        if (!mStreaming) {
++            return;
++        }
++        mStreaming = false; // pump thread observes this and exits its loop
++        // FR-STR-07: retry the stop frame and confirm quiet before returning. This scaffold sends
++        // it once and joins the pump thread; the retry-and-verify loop the requirement actually
++        // asks for needs a live reader to validate the "confirm quiet" half against, so it is
++        // deliberately left as a documented gap rather than an unverified retry count.
++        try {
++            if (mNativeHandle != 0) {
++                nativeWrite(mNativeHandle,
++                        UhfProtocol.buildFrame(UhfProtocol.ADDRESS_BROADCAST, 0x76,
++                                new byte[] {0x00}));
++            }
++        } catch (RuntimeException e) {
++            Slog.w(TAG, "failed to send stop-streaming frame", e);
++        }
++        Thread pump = mPumpThread;
++        if (pump != null) {
++            try {
++                pump.join(1000);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++            }
++        }
++        mPumpThread = null;
++    }
++
++    private void pumpLoop(StreamCallback callback) {
++        byte[] buf = new byte[4096];
++        int len = 0;
++        long lastByteAt = System.nanoTime();
++        while (mStreaming) {
++            int n;
++            try {
++                n = nativeRead(mNativeHandle, buf, len, buf.length - len, READ_TIMEOUT_MS);
++            } catch (RuntimeException e) {
++                callback.onError(UhfProtocol.ERROR_DEVICE_LOST);
++                return;
++            }
++            if (n > 0) {
++                len += n;
++                lastByteAt = System.nanoTime();
++            }
++            boolean stale = (System.nanoTime() - lastByteAt) > FR_LNK_05_INTER_BYTE_GAP_NANOS;
++
++            List<byte[]> batch = new ArrayList<>();
++            int offset = 0;
++            while (offset < len) {
++                UhfProtocol.ScanResult r =
++                        UhfProtocol.scanWithStallRecovery(buf, offset, len - offset, stale);
++                if (r.outcome == UhfProtocol.ScanOutcome.NEED_MORE_DATA) {
++                    break;
++                }
++                if (r.outcome == UhfProtocol.ScanOutcome.RESYNC) {
++                    offset += r.bytesToDiscard;
++                    continue;
++                }
++                offset += r.frame.wireLength;
++                if (r.frame.command == 0xEE) { // real-time tag frame; see UHF-SRS-001 §1.3
++                    batch.add(r.frame.data);
++                }
++            }
++            if (offset > 0) {
++                System.arraycopy(buf, offset, buf, 0, len - offset);
++                len -= offset;
++            }
++            if (!batch.isEmpty()) {
++                callback.onTagBatch(batch.toArray(new byte[0][]));
++            }
++        }
++    }
++
++    private void requireOpen() throws UhfTransportException {
++        if (mNativeHandle == 0) {
++            throw new UhfTransportException(UhfProtocol.ERROR_DEVICE_LOST, "transport not open");
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // Native methods. Implemented by libuhf_jni (jni/uhf_serial_jni.cpp); see that file's header
++    // comment for exactly what is and is not confirmed about it — in short, it is a standard
++    // termios open/configure/read/write/close, structurally complete but never linked, loaded, or
++    // run in this environment.
++    // ---------------------------------------------------------------------------------------
++
++    /** @return an opaque non-zero handle, or 0 on failure. */
++    private static native long nativeOpen(String devicePath, int baudRate);
++
++    private static native void nativeClose(long handle);
++
++    /** @return the number of bytes read into {@code buf[offset..offset+length)}, or 0 on a read
++     * timeout; never blocks past {@code timeoutMs}. */
++    private static native int nativeRead(long handle, byte[] buf, int offset, int length,
++            int timeoutMs);
++
++    private static native void nativeWrite(long handle, byte[] frame);
++
++    /** FR-LNK-08: discard any bytes already buffered by the kernel driver before a transaction. */
++    private static native void nativePurgeReceiveBuffer(long handle);
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+new file mode 100644
+index 00000000..1ffc6222
+--- /dev/null
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -0,0 +1,497 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.android.server.uhf;
++
++import android.Manifest;
++import android.content.Context;
++import android.hardware.uhf.IUhfService;
++import android.hardware.uhf.IUhfStateCallback;
++import android.hardware.uhf.IUhfTagCallback;
++import android.hardware.uhf.InventoryParams;
++import android.hardware.uhf.StreamParams;
++import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.UhfDeviceInfo;
++import android.hardware.uhf.UhfManager;
++import android.hardware.uhf.UhfReaderInfo;
++import android.hardware.uhf.UhfTag;
++import android.os.Binder;
++import android.os.IBinder;
++import android.os.RemoteException;
++import android.os.ServiceSpecificException;
++import android.util.Slog;
++
++import com.android.server.SystemService;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.atomic.AtomicLong;
++
++/**
++ * The {@code system_server} half of UHF-SRS-001. Binder/permission/lifecycle plumbing and the
++ * per-session bookkeeping that only makes sense at this layer (stream parameters, stream
++ * statistics, UID ownership of a session token) live here; the actual reader policy — exclusivity,
++ * the antenna interlock, the power ceiling, streaming's mutual exclusion with everything else —
++ * lives in {@link UhfSessionArbiter}, kept deliberately unit-testable without a framework build
++ * (see {@code UhfSessionArbiterTest}). This class, and only this class, is where
++ * {@code android.hardware.uhf.*} Parcelable types get translated to and from the framework-
++ * independent types {@link UhfProtocol} and {@link UhfSessionArbiter} use — neither of those two
++ * classes imports anything under {@code android.hardware.uhf}, on purpose.
++ *
++ * <p>Per SRS §3.2's "phased alternative", Phase 1 talks to the reader through
++ * {@link UhfSerialTransport} directly from this process rather than through a vendor HAL — that
++ * boundary is exactly {@link UhfTransport}, so the eventual HAL-backed transport is a drop-in
++ * replacement here, not a rewrite.
++ */
++public final class UhfService extends SystemService {
++    private static final String TAG = "UhfService";
++    private static final String DEFAULT_READER_ID = "uhf0";
++
++    // Mirrors android.hardware.uhf.UhfException.ERROR_*. Services code must not import framework
++    // @SystemApi classes for their constants the way app code would; these are the same stable
++    // values by contract (§5.5), not by a shared reference across the layering boundary.
++    private static final int UHF_ERROR_BUSY = 8;
++    private static final int UHF_ERROR_DEVICE_LOST = 7;
++    private static final int UHF_ERROR_INVALID_PARAMETER = 5;
++
++    private final UhfSessionArbiter mArbiter;
++    private final ConcurrentHashMap<IBinder, SessionState> mSessions = new ConcurrentHashMap<>();
++    private final CopyOnWriteArrayList<IUhfStateCallback> mStateCallbacks =
++            new CopyOnWriteArrayList<>();
++
++    /** Everything about one open session that belongs at the Binder/framework layer, not in
++     * {@link UhfSessionArbiter} (which only knows about reader *mode*, not app-facing config or
++     * per-client statistics). */
++    private static final class SessionState {
++        final int ownerUid;
++        final IBinder clientToken;
++        final IBinder.DeathRecipient deathRecipient;
++        volatile StreamParams streamParams = new StreamParams.Builder().build();
++        final StreamStatsAccumulator stats = new StreamStatsAccumulator();
++
++        SessionState(int ownerUid, IBinder clientToken, IBinder.DeathRecipient deathRecipient) {
++            this.ownerUid = ownerUid;
++            this.clientToken = clientToken;
++            this.deathRecipient = deathRecipient;
++        }
++    }
++
++    /** FR-STR-10: tracks stats from the first delivered read, not from {@code startStreaming()};
++     * see {@link StreamStats}'s doc for why that distinction is load-bearing. */
++    private static final class StreamStatsAccumulator {
++        private final Set<String> uniqueEpcHex = new HashSet<>();
++        private long totalReadCount;
++        private long droppedBatchCount;
++        private long firstReadNanos = -1;
++
++        synchronized void onBatch(List<UhfTag> batch) {
++            if (firstReadNanos < 0 && !batch.isEmpty()) {
++                firstReadNanos = System.nanoTime();
++            }
++            for (UhfTag tag : batch) {
++                uniqueEpcHex.add(tag.getEpcHex());
++            }
++            totalReadCount += batch.size();
++        }
++
++        synchronized void onBatchDropped() {
++            droppedBatchCount++;
++        }
++
++        synchronized StreamStats snapshot() {
++            long elapsedMs = firstReadNanos < 0 ? 0 : (System.nanoTime() - firstReadNanos) / 1_000_000;
++            double rate = elapsedMs > 0 ? (totalReadCount * 1000.0 / elapsedMs) : 0.0;
++            return new StreamStats(uniqueEpcHex.size(), totalReadCount, rate, droppedBatchCount,
++                    elapsedMs);
++        }
++
++        /** Resets counters and the elapsed-time base together — see {@link StreamStats}'s doc on
++         * why resetting one without the other drifts the rate upward across repeated runs. */
++        synchronized void reset() {
++            uniqueEpcHex.clear();
++            totalReadCount = 0;
++            droppedBatchCount = 0;
++            firstReadNanos = -1;
++        }
++    }
++
++    public UhfService(Context context) {
++        super(context);
++        UhfTransport transport = new UhfSerialTransport();
++        SettingsRegionStore regionStore = new SettingsRegionStore(context);
++        mArbiter = new UhfSessionArbiter(transport, regionStore, (client, bandCode) ->
++                Slog.i(TAG, "region changed to band 0x" + Integer.toHexString(bandCode))); // FR-FRQ-04
++    }
++
++    @Override
++    public void onStart() {
++        publishBinderService(Context.UHF_SERVICE, new BinderService());
++    }
++
++    @Override
++    public void onBootPhase(int phase) {
++        if (phase != SystemService.PHASE_SYSTEM_SERVICES_READY) {
++            return;
++        }
++        // FR-LC-05/09: unconditional, before any client can possibly call openSession().
++        try {
++            mArbiter.performStartupReset();
++            broadcastState(UhfManager.STATE_READY);
++        } catch (UhfTransportException e) {
++            // No reader attached, or it didn't answer. Not fatal to boot — FR-LC-01 requires the
++            // service to be able to report "hardware present but unavailable" rather than take
++            // system_server down over an unplugged reader.
++            Slog.w(TAG, "startup reset failed; reader absent or unresponsive", e);
++            broadcastState(UhfManager.STATE_ABSENT);
++        }
++        // Hot-plug (attach/detach after boot) requires a uevent listener wired into
++        // UhfSerialTransport; not implemented in this scaffold (see its class doc) — FR-LC-06's
++        // 2-second delivery bound is therefore unverified until that lands, tracked alongside it.
++    }
++
++    private void broadcastState(int state) {
++        for (IUhfStateCallback cb : mStateCallbacks) {
++            try {
++                cb.onStateChanged(state);
++            } catch (RemoteException e) {
++                mStateCallbacks.remove(cb);
++            }
++        }
++    }
++
++    private final class BinderService extends IUhfService.Stub {
++
++        @Override
++        public boolean isReaderAvailable() {
++            return mArbiter.isTransportOpen();
++        }
++
++        @Override
++        public List<UhfDeviceInfo> getReaders() {
++            // FR-LC-02: this reader family exposes exactly one device per service instance in
++            // Phase 1; multi-reader enumeration is Phase 2+ (OI-06 is still open on whether a
++            // second reader model is even in scope).
++            if (!mArbiter.isTransportOpen()) {
++                return Collections.emptyList();
++            }
++            return Collections.singletonList(
++                    new UhfDeviceInfo(DEFAULT_READER_ID, UhfSerialTransport.DEVICE_PATH));
++        }
++
++        @Override
++        public IBinder openSession(String readerId, IBinder clientToken) {
++            enforceRead();
++            IBinder sessionToken = new Binder();
++            try {
++                mArbiter.openSession(sessionToken);
++            } catch (UhfSessionArbiter.UhfBusyException e) {
++                throw new ServiceSpecificException(
++                        UHF_ERROR_BUSY, "reader session already held by another caller");
++            }
++            int callingUid = Binder.getCallingUid();
++            IBinder.DeathRecipient recipient = () -> {
++                Slog.w(TAG, "client for session " + sessionToken + " died; releasing (FR-LC-04)");
++                mArbiter.onClientDied(sessionToken);
++                mSessions.remove(sessionToken);
++            };
++            try {
++                clientToken.linkToDeath(recipient, 0);
++            } catch (RemoteException e) {
++                // Client was already dead by the time we tried to link. Release immediately
++                // rather than leaving a session no one will ever close.
++                mArbiter.onClientDied(sessionToken);
++                throw new ServiceSpecificException(UHF_ERROR_DEVICE_LOST, "client died mid-open");
++            }
++            mSessions.put(sessionToken, new SessionState(callingUid, clientToken, recipient));
++            return sessionToken;
++        }
++
++        @Override
++        public void closeSession(IBinder sessionToken) {
++            SessionState state = requireOwnedSession(sessionToken);
++            state.clientToken.unlinkToDeath(state.deathRecipient, 0);
++            mArbiter.closeSession(sessionToken);
++            mSessions.remove(sessionToken);
++        }
++
++        @Override
++        public void registerStateCallback(IUhfStateCallback callback) {
++            mStateCallbacks.add(callback);
++        }
++
++        @Override
++        public void unregisterStateCallback(IUhfStateCallback callback) {
++            mStateCallbacks.remove(callback);
++        }
++
++        @Override
++        public UhfReaderInfo getReaderInfo(IBinder sessionToken) {
++            enforceRead();
++            requireOwnedSession(sessionToken);
++            UhfProtocol.ReaderInfo info = runTransport(() -> mArbiter.getReaderInfo(sessionToken));
++            UhfProtocol.BandPlan band = UhfProtocol.bandPlanForCode(info.bandCode);
++            return new UhfReaderInfo(
++                    info.firmwareVersionString(),
++                    info.modelType,
++                    info.supportsIso18000_6c,
++                    info.supportsIso18000_6b,
++                    info.bandCode,
++                    band != null ? band.name : "",
++                    band != null ? band.centerFrequencyMhz(0) : 0.0,
++                    band != null ? band.centerFrequencyMhz(band.maxN) : 0.0,
++                    info.maxRfPower,
++                    info.scanTimeUnits * 100,
++                    info.antennaMask,
++                    info.antennaCheckEnabled);
++        }
++
++        @Override
++        public void setRegion(IBinder sessionToken, int bandCode) {
++            enforceConfigure();
++            requireOwnedSession(sessionToken);
++            runTransportVoid(() -> mArbiter.setRegion(sessionToken, bandCode));
++        }
++
++        @Override
++        public void setRfPower(IBinder sessionToken, int power, boolean allowAboveSafeCeiling) {
++            enforceConfigure();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.setRfPower(sessionToken, power, allowAboveSafeCeiling);
++            } catch (IllegalArgumentException | UhfSessionArbiter.UhfSafetyCeilingExceededException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public int getRfPower(IBinder sessionToken) {
++            enforceConfigure();
++            requireOwnedSession(sessionToken);
++            return mArbiter.getRfPower(sessionToken);
++        }
++
++        @Override
++        public int getSafeRfPowerCeiling(IBinder sessionToken) {
++            enforceConfigure(); // see getEnabledAntennas()'s note
++            requireOwnedSession(sessionToken);
++            return mArbiter.getSafePowerCeiling();
++        }
++
++        @Override
++        public void setEnabledAntennas(IBinder sessionToken, int mask) {
++            enforceConfigure();
++            requireOwnedSession(sessionToken);
++            runTransportVoid(() -> mArbiter.setEnabledAntennas(sessionToken, mask));
++        }
++
++        @Override
++        public int getEnabledAntennas(IBinder sessionToken) {
++            // §2.3: region/power/antenna is the OEM-integrator's surface (UHF_CONFIGURE), not a
++            // plain app's (UHF_READ) — an app calls inventory()/startStreaming() and gets tags
++            // without ever needing to introspect radio config. Consistent with getRfPower() and
++            // isAntennaCheckEnabled() below; a plain UHF_READ holder can read tags but not the
++            // reader's RF configuration.
++            enforceConfigure();
++            requireOwnedSession(sessionToken);
++            return mArbiter.getEnabledAntennas(sessionToken);
++        }
++
++        @Override
++        public void setAntennaCheckEnabled(IBinder sessionToken, boolean enabled) {
++            enforceConfigure();
++            requireOwnedSession(sessionToken);
++            runTransportVoid(() -> mArbiter.setAntennaCheckEnabled(sessionToken, enabled));
++        }
++
++        @Override
++        public boolean isAntennaCheckEnabled(IBinder sessionToken) {
++            enforceConfigure(); // see getEnabledAntennas()'s note
++            requireOwnedSession(sessionToken);
++            return mArbiter.isAntennaCheckEnabled(sessionToken);
++        }
++
++        @Override
++        public List<UhfTag> inventory(IBinder sessionToken, InventoryParams params) {
++            enforceRead();
++            requireOwnedSession(sessionToken);
++            List<UhfProtocol.TagRecord> records = runTransport(() -> mArbiter.inventory(
++                    sessionToken,
++                    params.getQValue(),
++                    params.getSession(),
++                    params.hasAntennaTargetScanTime(),
++                    params.getAntenna(),
++                    params.getTarget(),
++                    params.getScanTimeMs()));
++            List<UhfTag> tags = new ArrayList<>(records.size());
++            long now = System.nanoTime();
++            int reportedAntenna = params.hasAntennaTargetScanTime() ? params.getAntenna() : 0;
++            for (int i = 0; i < records.size(); i++) {
++                UhfProtocol.TagRecord r = records.get(i);
++                tags.add(new UhfTag(r.epc, r.tid, r.rssi, reportedAntenna, now, i));
++            }
++            return tags;
++        }
++
++        @Override
++        public void setStreamParams(IBinder sessionToken, StreamParams params) {
++            enforceRead();
++            SessionState state = requireOwnedSession(sessionToken);
++            state.streamParams = params; // FR-STR-08 applies it next time streaming (re)starts
++        }
++
++        @Override
++        public void startStreaming(IBinder sessionToken, IUhfTagCallback callback) {
++            enforceRead();
++            SessionState state = requireOwnedSession(sessionToken);
++            StreamParams params = state.streamParams;
++            runTransportVoid(() -> mArbiter.startStreaming(sessionToken,
++                    new UhfSessionArbiter.StreamRequest(params.getQValue(), params.getSession()),
++                    new BinderStreamCallback(callback, state.stats)));
++        }
++
++        @Override
++        public void stopStreaming(IBinder sessionToken) {
++            requireOwnedSession(sessionToken);
++            mArbiter.stopStreaming(sessionToken);
++        }
++
++        @Override
++        public boolean isStreaming(IBinder sessionToken) {
++            requireOwnedSession(sessionToken);
++            return mArbiter.isStreaming(sessionToken);
++        }
++
++        @Override
++        public StreamStats getStreamStats(IBinder sessionToken) {
++            SessionState state = requireOwnedSession(sessionToken);
++            return state.stats.snapshot();
++        }
++
++        @Override
++        public void resetStreamStats(IBinder sessionToken) {
++            SessionState state = requireOwnedSession(sessionToken);
++            state.stats.reset();
++        }
++
++        // -----------------------------------------------------------------------------------
++
++        private void enforceRead() {
++            getContext().enforceCallingOrSelfPermission(
++                    Manifest.permission.UHF_READ, "requires android.permission.UHF_READ");
++        }
++
++        private void enforceConfigure() {
++            getContext().enforceCallingOrSelfPermission(
++                    Manifest.permission.UHF_CONFIGURE, "requires android.permission.UHF_CONFIGURE");
++        }
++
++        /**
++         * FR-LC-03's exclusivity is enforced by {@link UhfSessionArbiter} itself (only the caller
++         * holding the token may act on it); this additionally enforces NFR-S-03 ("verify the
++         * session token belongs to the calling UID") — a Binder-identity concern the arbiter has
++         * no way to check on its own since it doesn't know about UIDs at all.
++         */
++        private SessionState requireOwnedSession(IBinder sessionToken) {
++            SessionState state = mSessions.get(sessionToken);
++            if (state == null || state.ownerUid != Binder.getCallingUid()) {
++                throw new ServiceSpecificException(
++                        UHF_ERROR_BUSY, "no open session for this caller");
++            }
++            return state;
++        }
++    }
++
++    /** Runs a transport-touching call, mapping {@link UhfTransportException} once, centrally. */
++    private interface TransportCall<T> {
++        T call() throws UhfTransportException;
++    }
++
++    private static <T> T runTransport(TransportCall<T> call) {
++        try {
++            return call.call();
++        } catch (UhfTransportException e) {
++            throw toServiceSpecificException(e);
++        }
++    }
++
++    private interface TransportVoidCall {
++        void call() throws UhfTransportException;
++    }
++
++    private static void runTransportVoid(TransportVoidCall call) {
++        try {
++            call.call();
++        } catch (UhfTransportException e) {
++            throw toServiceSpecificException(e);
++        }
++    }
++
++    private static ServiceSpecificException toServiceSpecificException(UhfTransportException e) {
++        return new ServiceSpecificException(e.getErrorCode(), e.getMessage());
++    }
++
++    private final class BinderStreamCallback implements UhfTransport.StreamCallback {
++        private final IUhfTagCallback mCallback;
++        private final StreamStatsAccumulator mStats;
++
++        BinderStreamCallback(IUhfTagCallback callback, StreamStatsAccumulator stats) {
++            mCallback = callback;
++            mStats = stats;
++        }
++
++        @Override
++        public void onTagBatch(byte[][] rawTagRecords) {
++            List<UhfTag> batch = new ArrayList<>(rawTagRecords.length);
++            long now = System.nanoTime();
++            for (byte[] raw : rawTagRecords) {
++                // Decoding raw frame bytes into UhfProtocol.TagRecord (and from there into
++                // UhfTag, as inventory() above does) happens in the pump-thread path this
++                // scaffold does not yet implement end-to-end — see UhfSerialTransport's class
++                // doc. Tracked as follow-up work, not part of this commit's tested surface.
++                batch.add(new UhfTag(raw, null, 0, 0, now, batch.size()));
++            }
++            mStats.onBatch(batch);
++            try {
++                mCallback.onTagsRead(batch);
++            } catch (RemoteException e) {
++                Slog.w(TAG, "client gone mid-stream", e);
++            }
++        }
++
++        @Override
++        public void onError(int transportErrorCode) {
++            // Note: this is a transport failure, not FR-STR-11's "client fell behind" case —
++            // that requires a bounded per-client delivery queue that drops whole batches under
++            // backpressure, which this scaffold does not implement yet (today, onTagBatch calls
++            // straight through to the oneway Binder callback with no queue in between, so there
++            // is nothing yet for StreamStatsAccumulator.onBatchDropped() to observe). Wiring that
++            // queue is follow-up work; leaving it unimplemented rather than half-modeling it here
++            // with a wrong trigger.
++            try {
++                mCallback.onStreamError(transportErrorCode, "transport error");
++            } catch (RemoteException e) {
++                Slog.w(TAG, "client gone mid-stream error", e);
++            }
++        }
++    }
++}
+diff --git a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+index fbb6e7da..df053330 100644
+--- a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
++++ b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+@@ -16,6 +16,8 @@
+ 
+ package com.android.server.uhf;
+ 
++import java.util.ArrayList;
++import java.util.List;
+ import java.util.concurrent.Callable;
+ 
+ /**
+@@ -45,6 +47,8 @@ public final class UhfSessionArbiter {
+     // Command bytes this class issues directly. Frame building/parsing is UhfProtocol's job; this
+     // class only decides *which* commands to send and in *what order* — the policy, not the wire
+     // format.
++    private static final int CMD_IDENTIFY = 0x21;
++    private static final int CMD_INVENTORY = 0x01; // FR-INV-01
+     private static final int CMD_REALTIME_MODE = 0x76;
+     private static final int CMD_ANTENNA_MASK = 0x3F;
+     private static final int CMD_ANTENNA_CHECK = 0x66;
+@@ -191,6 +195,15 @@ public final class UhfSessionArbiter {
+         return holder != null;
+     }
+ 
++    /** FR-LC-01: distinguishes "no hardware" from "hardware present but unavailable" — a
++     * closed transport after {@link #performStartupReset} has been attempted means no reader
++     * answered, not that no one has asked yet. Does not require an open session, unlike every
++     * other query here: an app must be able to check this *before* deciding whether to try
++     * {@link #openSession}. */
++    public synchronized boolean isTransportOpen() {
++        return transport.isOpen();
++    }
++
+     private void requireHolder(Object clientToken) {
+         if (holder != clientToken) {
+             throw new IllegalStateException("caller does not hold the session");
+@@ -233,6 +246,66 @@ public final class UhfSessionArbiter {
+         antennaCheckEnabled = enabled;
+     }
+ 
++    public synchronized boolean isAntennaCheckEnabled(Object clientToken) {
++        requireHolder(clientToken);
++        return antennaCheckEnabled;
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-INF-01: reader identity. Returns the wire-codec type, not a framework Parcelable —
++    // this class stays framework-independent (see the class doc); UhfService does that mapping.
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized UhfProtocol.ReaderInfo getReaderInfo(Object clientToken)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        byte[] payload = transport.transact(CMD_IDENTIFY, new byte[0], DEFAULT_TIMEOUT_MS);
++        UhfProtocol.ReaderInfo info = UhfProtocol.decodeReaderInfo(payload);
++        maxRfPowerFromReader = info.maxRfPower; // FR-PWR-02: keep the enforced ceiling current
++        return info;
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // FR-INV-01..05: polled inventory. Governed by FR-STR-13 like buffered inventory and tag
++    // ops: if a stream is active, it is stopped for the duration of this one round and restarted
++    // afterward, rather than left to collide with the reader's one-command-per-cycle constraint
++    // (NFR-C-01).
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized List<UhfProtocol.TagRecord> inventory(Object clientToken, int qValue,
++            int session, boolean hasAntennaTargetScanTime, int antenna, int target,
++            int scanTimeMs) throws UhfTransportException {
++        requireHolder(clientToken);
++        return runExclusiveOfActiveMode(() -> {
++            byte[] payload = hasAntennaTargetScanTime
++                    ? new byte[] {(byte) qValue, (byte) session, (byte) antenna, (byte) target,
++                            (byte) (scanTimeMs / 100)} // FR-INV-05: all three or none
++                    : new byte[] {(byte) qValue, (byte) session};
++            byte[] reply = transport.transact(CMD_INVENTORY, payload, DEFAULT_TIMEOUT_MS);
++            // The Phase 1 UhfTransport contract (see its interface doc) already assembles
++            // multi-frame (status 0x03) replies into one concatenated payload before returning,
++            // so status here is always terminal. UhfProtocol.Frame's constructor is
++            // package-private, not public — deliberately, so only code that actually parsed a
++            // frame off the wire (or, as here, code in the same package reconstructing one from
++            // an already-fully-assembled reply) can create one; a caller elsewhere fabricating a
++            // Frame with an arbitrary wireLength would be exactly the kind of "plausible but
++            // wrong" bug §4.2's FR-INF-02 note warns about.
++            List<UhfProtocol.Frame> chain = new ArrayList<>();
++            chain.add(new UhfProtocol.Frame(
++                    UhfProtocol.ADDRESS_BROADCAST, CMD_INVENTORY, reply, reply.length + 5));
++            int status = reply.length > 0 ? (reply[0] & 0xFF) : UhfProtocol.STATUS_NO_OPERABLE_TAGS;
++            int error = UhfProtocol.mapStatusToError(status);
++            if (error != UhfProtocol.ERROR_NONE) {
++                throw new UhfTransportException(error, "inventory status 0x"
++                        + Integer.toHexString(status));
++            }
++            if (status == UhfProtocol.STATUS_NO_OPERABLE_TAGS) {
++                return new ArrayList<UhfProtocol.TagRecord>(); // FR-INV-08: empty, not an error
++            }
++            return UhfProtocol.assembleAndDecodeInventory(chain);
++        });
++    }
++
+     // ---------------------------------------------------------------------------------------
+     // FR-PWR-01..03: RF power with the enforced safe ceiling
+     // ---------------------------------------------------------------------------------------
+diff --git a/services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp b/services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp
+new file mode 100644
+index 00000000..5d2f29f4
+--- /dev/null
++++ b/services/core/jni/uhf/com_android_server_uhf_UhfSerialTransport.cpp
+@@ -0,0 +1,171 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// Backs com.android.server.uhf.UhfSerialTransport's native methods: open/configure/read/write/
++// close/purge on the reader's tty, per UHF-SRS-001 FR-LNK-01/08.
++//
++// STATUS: written, not built or run. This has not been compiled (would need this file registered
++// in services/core/jni/onload.cpp and a services.core Android.bp native lib target, neither of
++// which this patch touches — deliberately, since getting that registration wrong risks the many
++// other HALs already wired through the same onload.cpp), and there is no reader attached to this
++// environment to exercise it against even if it were built. It is standard termios usage with no
++// UHF-specific logic in it at all — every byte it hands to Java goes through UhfProtocol's already
++// -tested parser before anything trusts it — but "standard" is not "verified"; treat this file the
++// same way the SRS's own Confirm status treats an inferred command code.
++//
++// One value genuinely is unconfirmed rather than merely untested: FR-LNK-01 specifies 115200 8N1,
++// which this hardcodes via kBaudRate/cfmakeraw's defaults (8 data bits, no parity, one stop bit,
++// no flow control) — that part of FR-LNK-01 is Verified elsewhere in the SRS, so it is safe to
++// hardcode here rather than plumb the reader's other candidate rates through JNI for a Phase 1
++// transport that only ever opens at one rate (FR-LNK-02, baud-rate change, is P2/Documented).
++
++#include <errno.h>
++#include <fcntl.h>
++#include <jni.h>
++#include <string.h>
++#include <termios.h>
++#include <unistd.h>
++
++#include <android-base/logging.h>
++#include <nativehelper/JNIHelp.h>
++#include <nativehelper/ScopedUtfChars.h>
++
++namespace android {
++
++namespace {
++
++constexpr const char* kLogTag = "UhfSerialTransport";
++
++// A "handle" here is just the fd, widened to jlong and offset by one so that fd 0 (stdin, never
++// actually what open() returns for a tty, but avoid the ambiguity) does not collide with the
++// Java-side "0 means not open" sentinel.
++inline jlong fdToHandle(int fd) {
++    return static_cast<jlong>(fd) + 1;
++}
++
++inline int handleToFd(jlong handle) {
++    return static_cast<int>(handle - 1);
++}
++
++jlong UhfSerialTransport_nativeOpen(JNIEnv* env, jclass, jstring devicePath, jint baudRate) {
++    ScopedUtfChars path(env, devicePath);
++    if (path.c_str() == nullptr) {
++        return 0;
++    }
++
++    int fd = ::open(path.c_str(), O_RDWR | O_NOCTTY);
++    if (fd < 0) {
++        ALOGE_IF(true, "%s: open(%s) failed: %s", kLogTag, path.c_str(), strerror(errno));
++        return 0;
++    }
++
++    speed_t speed;
++    switch (baudRate) {
++        case 115200: speed = B115200; break;
++        case 230400: speed = B230400; break; // OI-03: not yet confirmed the reader accepts this
++        case 460800: speed = B460800; break; // OI-03: ditto
++        default:
++            ::close(fd);
++            return 0;
++    }
++
++    termios tty{};
++    if (tcgetattr(fd, &tty) != 0) {
++        ::close(fd);
++        return 0;
++    }
++    cfmakeraw(&tty); // 8N1, no flow control, no line discipline processing
++    cfsetispeed(&tty, speed);
++    cfsetospeed(&tty, speed);
++    tty.c_cflag |= (CLOCAL | CREAD);
++    // VMIN/VTIME are not relied on for read timeouts — nativeRead uses poll() with an explicit
++    // per-call timeout instead, so a read never blocks longer than the Java side asked for.
++    tty.c_cc[VMIN] = 0;
++    tty.c_cc[VTIME] = 0;
++
++    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
++        ::close(fd);
++        return 0;
++    }
++    tcflush(fd, TCIOFLUSH);
++
++    return fdToHandle(fd);
++}
++
++void UhfSerialTransport_nativeClose(JNIEnv*, jclass, jlong handle) {
++    ::close(handleToFd(handle));
++}
++
++void UhfSerialTransport_nativePurgeReceiveBuffer(JNIEnv*, jclass, jlong handle) {
++    tcflush(handleToFd(handle), TCIFLUSH);
++}
++
++void UhfSerialTransport_nativeWrite(JNIEnv* env, jclass, jlong handle, jbyteArray frame) {
++    int fd = handleToFd(handle);
++    jsize len = env->GetArrayLength(frame);
++    jbyte* bytes = env->GetByteArrayElements(frame, nullptr);
++    if (bytes == nullptr) {
++        return;
++    }
++    // FR-LNK-05: the reader treats a >15ms inter-byte gap on a *transmitted* frame as a partial
++    // frame to discard. A single write() of the whole buffer is what keeps that gap near zero;
++    // this does not loop on a short write; a real implementation should, and does not here only
++    // because there is no reader on this fd to observe the difference against.
++    ssize_t written = ::write(fd, bytes, static_cast<size_t>(len));
++    if (written != len) {
++        ALOGE_IF(true, "%s: short write (%zd of %d bytes): %s", kLogTag, written, len,
++                 strerror(errno));
++    }
++    env->ReleaseByteArrayElements(frame, bytes, JNI_ABORT);
++}
++
++jint UhfSerialTransport_nativeRead(JNIEnv* env, jclass, jlong handle, jbyteArray buf, jint offset,
++                                    jint length, jint timeoutMs) {
++    int fd = handleToFd(handle);
++
++    pollfd pfd{};
++    pfd.fd = fd;
++    pfd.events = POLLIN;
++    int pollResult = poll(&pfd, 1, timeoutMs);
++    if (pollResult <= 0) {
++        return 0; // timeout or error: caller (the pump loop / transactOnce) treats 0 as "no data"
++    }
++
++    jbyte* bytes = env->GetByteArrayElements(buf, nullptr);
++    if (bytes == nullptr) {
++        return 0;
++    }
++    ssize_t n = ::read(fd, bytes + offset, static_cast<size_t>(length));
++    env->ReleaseByteArrayElements(buf, bytes, n > 0 ? 0 : JNI_ABORT);
++    return n > 0 ? static_cast<jint>(n) : 0;
++}
++
++const JNINativeMethod gMethods[] = {
++        {"nativeOpen", "(Ljava/lang/String;I)J", (void*)UhfSerialTransport_nativeOpen},
++        {"nativeClose", "(J)V", (void*)UhfSerialTransport_nativeClose},
++        {"nativeRead", "(J[BIII)I", (void*)UhfSerialTransport_nativeRead},
++        {"nativeWrite", "(J[B)V", (void*)UhfSerialTransport_nativeWrite},
++        {"nativePurgeReceiveBuffer", "(J)V", (void*)UhfSerialTransport_nativePurgeReceiveBuffer},
++};
++
++}  // namespace
++
++int register_android_server_uhf_UhfSerialTransport(JNIEnv* env) {
++    return jniRegisterNativeMethods(env, "com/android/server/uhf/UhfSerialTransport", gMethods,
++                                     NELEM(gMethods));
++}
++
++}  // namespace android
+diff --git a/services/java/com/android/server/SystemServer.java b/services/java/com/android/server/SystemServer.java
+index 10dcc65c..8d9f35a5 100644
+--- a/services/java/com/android/server/SystemServer.java
++++ b/services/java/com/android/server/SystemServer.java
+@@ -291,6 +291,8 @@ public final class SystemServer implements Dumpable {
+             "com.android.server.stats.bootstrap.StatsBootstrapAtomService$Lifecycle";
+     private static final String USB_SERVICE_CLASS =
+             "com.android.server.usb.UsbService$Lifecycle";
++    private static final String UHF_SERVICE_CLASS =
++            "com.android.server.uhf.UhfService";
+     private static final String MIDI_SERVICE_CLASS =
+             "com.android.server.midi.MidiService$Lifecycle";
+     private static final String WIFI_APEX_SERVICE_JAR_PATH =
+@@ -2315,6 +2317,21 @@ public final class SystemServer implements Dumpable {
+                 t.traceEnd();
+             }
+ 
++            if (mPackageManager.hasSystemFeature(PackageManager.FEATURE_UHF_READER)) {
++                // UHF-SRS-001: platform-owned UHF RFID reader. NFR-C-06 relies on this class
++                // simply not existing on devices without the feature — UhfManager's
++                // getSystemService(Context.UHF_SERVICE) then returns null via the standard
++                // ServiceNotFoundException path in SystemServiceRegistry, rather than this
++                // service needing to do anything special to be "absent".
++                t.traceBegin("StartUhfService");
++                try {
++                    mSystemServiceManager.startService(UHF_SERVICE_CLASS);
++                } catch (Throwable e) {
++                    reportWtf("starting UhfService", e);
++                }
++                t.traceEnd();
++            }
++
+             if (!isWatch) {
+                 t.traceBegin("StartSerialService");
+                 try {
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+index 62489c2b..d7d9f6b4 100644
+--- a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+@@ -16,6 +16,7 @@
+ 
+ package com.android.server.uhf;
+ 
++import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
+@@ -193,6 +194,19 @@ public class UhfSessionArbiterTest {
+         assertEquals(1, transport.lastAntennaCheckValue(1)); // second 0x66 call re-enabled it
+     }
+ 
++    @Test
++    public void isAntennaCheckEnabled_reflectsTheLastValueSet() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        assertFalse("defaults to off", arbiter.isAntennaCheckEnabled(client));
++
++        arbiter.setAntennaCheckEnabled(client, true);
++        assertTrue(arbiter.isAntennaCheckEnabled(client));
++
++        arbiter.setAntennaCheckEnabled(client, false);
++        assertFalse(arbiter.isAntennaCheckEnabled(client));
++    }
++
+     @Test
+     public void setEnabledAntennas_skipsTheInterlockWhenCheckWasAlreadyOff() throws Exception {
+         Object client = new Object();
+@@ -205,6 +219,126 @@ public class UhfSessionArbiterTest {
+                 List.of("transact(0x3f)"), transport.calls);
+     }
+ 
++    // ---------------------------------------------------------------------------------------
++    // FR-INF-01/02/03: reader identity, and FR-INV-01..08: polled inventory
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void getReaderInfo_decodesIdentifyReplyAndRefreshesThePowerCeiling() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        byte[] identifyPayload = {
++            1, 24, 0x07, 0x01, (byte) 0b01_000000, 0, 25, 10, 0b0011, 0x01,
++        };
++        transport.cannedReplies.put(0x21, identifyPayload);
++
++        UhfProtocol.ReaderInfo info = arbiter.getReaderInfo(client);
++
++        assertEquals("1.24", info.firmwareVersionString());
++        assertEquals(25, info.maxRfPower);
++        // FR-PWR-02's ceiling must track the reader's actual reported max, not a hardcoded 30.
++        try {
++            arbiter.setRfPower(client, 26, true);
++            fail("26 exceeds the just-refreshed reader maximum of 25");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void inventory_noOperableTagsReturnsEmptyListNotAnException() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x01, new byte[] {(byte) UhfProtocol.STATUS_NO_OPERABLE_TAGS});
++
++        List<UhfProtocol.TagRecord> result =
++                arbiter.inventory(client, 4, 0, false, 0, 0, 0);
++
++        assertTrue(result.isEmpty());
++    }
++
++    @Test
++    public void inventory_antennaFaultStatusThrowsWithTheMappedErrorCode() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x01,
++                new byte[] {(byte) UhfProtocol.STATUS_ANTENNA_CHECK_FAILURE});
++
++        try {
++            arbiter.inventory(client, 4, 0, false, 0, 0, 0);
++            fail("expected UhfTransportException for 0xF8");
++        } catch (UhfTransportException e) {
++            assertEquals(UhfProtocol.ERROR_ANTENNA_FAULT, e.getErrorCode());
++        }
++    }
++
++    @Test
++    public void inventory_decodesTagsOnSuccess() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        byte[] tagBlob = {0x02, 0x11, 0x22, 0x33, 0x44, (byte) 90}; // 2-word EPC + RSSI
++        byte[] reply = new byte[1 + tagBlob.length];
++        reply[0] = (byte) UhfProtocol.STATUS_INVENTORY_COMPLETE;
++        System.arraycopy(tagBlob, 0, reply, 1, tagBlob.length);
++        transport.cannedReplies.put(0x01, reply);
++
++        List<UhfProtocol.TagRecord> result = arbiter.inventory(client, 4, 0, false, 0, 0, 0);
++
++        assertEquals(1, result.size());
++        assertArrayEquals(new byte[] {0x11, 0x22, 0x33, 0x44}, result.get(0).epc);
++        assertEquals(90, result.get(0).rssi);
++    }
++
++    @Test
++    public void inventory_withoutAntennaTargetScanTime_sendsOnlyQAndSession() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x01, new byte[] {(byte) UhfProtocol.STATUS_NO_OPERABLE_TAGS});
++
++        arbiter.inventory(client, 6, 2, false, 0, 0, 0);
++
++        assertArrayEquals(new byte[] {6, 2}, transport.lastInventoryPayload);
++    }
++
++    @Test
++    public void inventory_withAntennaTargetScanTime_sendsAllThreeTogetherPerFrInv05()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x01, new byte[] {(byte) UhfProtocol.STATUS_NO_OPERABLE_TAGS});
++
++        arbiter.inventory(client, 4, 0, true, 2, targetB(), 500);
++
++        assertEquals(5, transport.lastInventoryPayload.length);
++        assertEquals(2, transport.lastInventoryPayload[2]);
++    }
++
++    @Test
++    public void inventory_whileStreaming_stopsAndRestartsTheStreamLikeOtherNonStreamCalls()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        transport.cannedReplies.put(0x01, new byte[] {(byte) UhfProtocol.STATUS_NO_OPERABLE_TAGS});
++        transport.reset();
++
++        arbiter.inventory(client, 4, 0, false, 0, 0, 0);
++
++        assertEquals(List.of("stopStream", "transact(0x1)", "startStream"), transport.calls);
++        assertTrue(arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void isTransportOpen_reflectsTheFakeTransportsState() throws Exception {
++        assertFalse(arbiter.isTransportOpen());
++        arbiter.performStartupReset();
++        assertTrue(arbiter.isTransportOpen());
++    }
++
++    private static int targetB() {
++        return 1; // mirrors InventoryParams.TARGET_B without a framework dependency in this test
++    }
++
+     // ---------------------------------------------------------------------------------------
+     // FR-PWR-02/03: power ceiling
+     // ---------------------------------------------------------------------------------------
+@@ -442,6 +576,8 @@ public class UhfSessionArbiterTest {
+         boolean isOpen;
+         boolean failStopStream;
+         boolean failNextStartStream;
++        final java.util.Map<Integer, byte[]> cannedReplies = new java.util.HashMap<>();
++        byte[] lastInventoryPayload;
+ 
+         /**
+          * Clears recorded call history between the "setup" portion of a test and the sequence
+@@ -476,7 +612,11 @@ public class UhfSessionArbiterTest {
+             if (command == 0x22 && payload.length > 0) {
+                 lastRegionWritten = payload[0] & 0xFF;
+             }
+-            return new byte[0];
++            if (command == 0x01) {
++                lastInventoryPayload = payload;
++            }
++            byte[] canned = cannedReplies.get(command);
++            return canned != null ? canned : new byte[0];
+         }
+ 
+         @Override public void startStream(StreamCallback callback) throws UhfTransportException {
+-- 
+2.34.1
+

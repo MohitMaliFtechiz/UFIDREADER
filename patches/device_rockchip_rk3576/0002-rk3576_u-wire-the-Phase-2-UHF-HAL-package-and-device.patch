@@ -1,0 +1,74 @@
+From 38b88fe4744f0d68e445ecde4bf404c62d64173a Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 09:46:37 +0200
+Subject: [PATCH 2/2] rk3576_u: wire the Phase 2 UHF HAL package and
+ device-node label
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds this products own uhf_device SELinux label (declared board-
+independently in hardware/rockchip/uhf, attached to a path here since
+which tty this reader enumerates on is a board property) and inherits
+that HAL projects product makefile.
+
+Both additions are scoped to this products own per-product files
+(BoardConfig.mk, rk3576_u.mk) rather than the shared
+device/rockchip/rk3576/BoardConfig.mk or device/rockchip/common/device.mk
+above/alongside them — the same scoping discipline this repos earlier
+UHF-SRS-001 Rev B ueventd commit already established, applied again here
+rather than let it lapse for a second file.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ rk3576_u/BoardConfig.mk         | 6 ++++++
+ rk3576_u/rk3576_u.mk            | 4 ++++
+ rk3576_u/sepolicy/file_contexts | 7 +++++++
+ 3 files changed, 17 insertions(+)
+ create mode 100644 rk3576_u/sepolicy/file_contexts
+
+diff --git a/rk3576_u/BoardConfig.mk b/rk3576_u/BoardConfig.mk
+index 0de19bb..2917b11 100755
+--- a/rk3576_u/BoardConfig.mk
++++ b/rk3576_u/BoardConfig.mk
+@@ -29,3 +29,9 @@ BOARD_GSENSOR_MXC6655XA_SUPPORT := true
+ BOARD_CAMERA_SUPPORT_EXT := true
+ BOARD_HS_ETHERNET := true
+ include device/rockchip/rk3576/BoardConfig.mk
++
++# UHF-SRS-001 Phase 2: this product's reader device-node label only — scoped here (per-product
++# BoardConfig.mk, included by no other Rockchip board) rather than the shared
++# device/rockchip/rk3576/BoardConfig.mk above, for the same reason the ueventd fix in this repo's
++# earlier commit was scoped the way it was.
++BOARD_SEPOLICY_DIRS += device/rockchip/rk3576/rk3576_u/sepolicy
+diff --git a/rk3576_u/rk3576_u.mk b/rk3576_u/rk3576_u.mk
+index f8ad9dd..aa3b73b 100755
+--- a/rk3576_u/rk3576_u.mk
++++ b/rk3576_u/rk3576_u.mk
+@@ -25,6 +25,10 @@ $(call inherit-product, device/rockchip/rk3576/device.mk)
+ $(call inherit-product, device/rockchip/common/device.mk)
+ $(call inherit-product, frameworks/native/build/tablet-10in-xhdpi-2048-dalvik-heap.mk)
+ 
++# UHF-SRS-001 Phase 2: this product only — see hardware/rockchip/uhf/uhf_hal.mk's own comment on
++# why it is inherited here and not from device/rockchip/common/device.mk above.
++$(call inherit-product, hardware/rockchip/uhf/uhf_hal.mk)
++
+ DEVICE_PACKAGE_OVERLAYS += $(LOCAL_PATH)/../overlay
+ 
+ PRODUCT_CHARACTERISTICS := tablet
+diff --git a/rk3576_u/sepolicy/file_contexts b/rk3576_u/sepolicy/file_contexts
+new file mode 100644
+index 0000000..10866e3
+--- /dev/null
++++ b/rk3576_u/sepolicy/file_contexts
+@@ -0,0 +1,7 @@
++# UHF-SRS-001 NFR-S-01. Board-specific: this reader enumerates as /dev/ttyUSB0 on rk3576_u.
++# uhf_device is declared once, board-independently, in
++# hardware/rockchip/uhf/aidl/default/sepolicy/hal_uhf.te.
++#
++# TODO(OI-05): narrow past every ttyUSB* once R1 confirms this reader's USB vendor/product ID —
++# mirrors the same open item on this product's ueventd.uhf.rc DAC rule.
++/dev/ttyUSB[0-9]*   u:object_r:uhf_device:s0
+-- 
+2.34.1
+

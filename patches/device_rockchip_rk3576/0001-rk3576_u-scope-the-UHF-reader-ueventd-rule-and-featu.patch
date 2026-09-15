@@ -1,0 +1,88 @@
+From c3a7d83559acca1af7e3d74c19263fb792e71da6 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 09:32:47 +0200
+Subject: [PATCH 1/2] rk3576_u: scope the UHF reader ueventd rule and feature
+ flag to this product
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Adds the two files device/rockchip/common's ueventd import resolves for
+this product only (rk3576_ebook and every other Rockchip board leave the
+import a no-op, since they don't copy ueventd.uhf.rc into their image):
+
+- ueventd.uhf.rc: interim node permission for the Phase 1 JNI transport
+  (system_server opens /dev/ttyUSB* directly as UID/GID 'system'). Phase 2
+  relabels the node to uhf_device for hal_uhf_default exclusively, per
+  UHF-SRS-001 NFR-S-01 — tracked in this file's own TODO, not deferred
+  silently.
+- android.hardware.uhf.xml: advertises the feature flag so
+  hasSystemFeature(FEATURE_UHF_READER) resolves correctly (SRS §5.4).
+
+This replaces UHF-SRS-001 Rev A's original sketch of editing a
+'rk3576_u/device.mk' that does not exist, and of writing the ueventd rule
+body directly into the shared common file — see this repo's Rev B
+changelog and the device/rockchip/common commit alongside this one.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ rk3576_u/android.hardware.uhf.xml |  6 ++++++
+ rk3576_u/rk3576_u.mk              | 12 ++++++++++++
+ rk3576_u/ueventd.uhf.rc           | 12 ++++++++++++
+ 3 files changed, 30 insertions(+)
+ create mode 100644 rk3576_u/android.hardware.uhf.xml
+ create mode 100644 rk3576_u/ueventd.uhf.rc
+
+diff --git a/rk3576_u/android.hardware.uhf.xml b/rk3576_u/android.hardware.uhf.xml
+new file mode 100644
+index 0000000..9858c50
+--- /dev/null
++++ b/rk3576_u/android.hardware.uhf.xml
+@@ -0,0 +1,6 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- UHF-SRS-001 §5.4/§8.1 row 16: advertises android.hardware.uhf so hasSystemFeature(
++     PackageManager.FEATURE_UHF_READER) and Play-style filtering see this device correctly. -->
++<permissions>
++    <feature name="android.hardware.uhf" />
++</permissions>
+diff --git a/rk3576_u/rk3576_u.mk b/rk3576_u/rk3576_u.mk
+index 5149f0c..f8ad9dd 100755
+--- a/rk3576_u/rk3576_u.mk
++++ b/rk3576_u/rk3576_u.mk
+@@ -44,3 +44,15 @@ PRODUCT_PROPERTY_OVERRIDES += persist.wifi.sleep.delay.ms=0
+ PRODUCT_PROPERTY_OVERRIDES += persist.bt.power.down=true
+ PRODUCT_PROPERTY_OVERRIDES += vendor.hwc.device.primary=DSI
+ PRODUCT_PROPERTY_OVERRIDES += vendor.hwc.device.extend=HDMI-A,eDP
++
++#
++## UHF-SRS-001 Phase 1: reader feature flag and the interim ueventd node-permission rule.
++## Scoped to this product only — see device/rockchip/common/rootdir/ueventd.rockchip.rc's
++## `import /vendor/etc/ueventd.uhf.rc` (a no-op on every other Rockchip board, which does not
++## copy this file) and this repo's UHF-SRS-001 Rev B changelog for why it is not the shared file.
++## The uhf-hal-service package entry (SRS §8.1 row 10/11) is added when Phase 2 lands; there is no
++## HAL binary to package yet.
++#
++PRODUCT_COPY_FILES += \
++    device/rockchip/rk3576/rk3576_u/ueventd.uhf.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.uhf.rc \
++    device/rockchip/rk3576/rk3576_u/android.hardware.uhf.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.uhf.xml
+diff --git a/rk3576_u/ueventd.uhf.rc b/rk3576_u/ueventd.uhf.rc
+new file mode 100644
+index 0000000..050639d
+--- /dev/null
++++ b/rk3576_u/ueventd.uhf.rc
+@@ -0,0 +1,12 @@
++# UHF-SRS-001 §8.2. Only copied into the image for rk3576_u (see this product's .mk); the import
++# in the shared device/rockchip/common/rootdir/ueventd.rockchip.rc is a harmless no-op on every
++# other Rockchip board, which does not copy this file and so never resolves the import target.
++#
++# Interim rule for the Phase 1 JNI transport: system_server (UID/GID "system") opens the node
++# directly. Phase 2 relabels this node to uhf_device and switches this line's group from "system"
++# to a dedicated "uhf" group readable/writable only by the hal_uhf_default sepolicy domain — at
++# that point neither system_server nor any app may open it at all (NFR-S-01).
++#
++# TODO(OI-05): this still matches every ttyUSB* on the board, not this reader specifically. Narrow
++# it with a DEVPATH match on the reader's USB vendor/product ID once R1 confirms them.
++/dev/ttyUSB*   0660   system   system
+-- 
+2.34.1
+

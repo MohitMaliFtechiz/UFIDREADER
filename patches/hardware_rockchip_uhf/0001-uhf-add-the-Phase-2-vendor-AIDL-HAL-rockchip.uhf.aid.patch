@@ -1,0 +1,979 @@
+From 5aa5ccac4d42bc5ae50bc5f273eabc7f0d2df765 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 09:45:18 +0200
+Subject: [PATCH] uhf: add the Phase 2 vendor AIDL HAL (rockchip.uhf.aidl)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+New project — unlike the other three repos in this patch series, there is
+no pre-existing vendor baseline to snapshot here; this commit is the
+addition. Implements UHF-SRS-001 §3.2/§5.3/§10.2 Phase 2, the HAL split
+that lets the Phase 1 JNI shortcut in frameworks/base be retired.
+
+Naming and file layout follow this tree own precedent for a custom
+Rockchip AIDL service, hardware/rockchip/hwc_proxy_service/, checked
+directly rather than assumed:
+- aidl_interface module rockchip.uhf.aidl (package rockchip.uhf.aidl),
+  not vendor.rockchip.hardware.uhf as UHF-SRS-001 Rev B guessed from
+  general Android convention — this tree real custom AIDL HALs use the
+  shorter rockchip.<name>.aidl shape instead.
+- cc_binary rockchip.uhf-service, vintf_fragments plus a separate
+  DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE fragment (both required —
+  hwc_proxy_service ships both for the same reason).
+- sepolicy: hal_uhf_default domain (Treble standard hal_x_default shape,
+  since this genuinely is a HAL default impl) plus the hal_uhf_service /
+  service_contexts pair hwc_proxy_service own comment explains is
+  required for an NDK-backend AIDL service — a real gap this research
+  closed that UHF-SRS-001 original sepolicy sketch had missed. Runs as
+  user root / group system in its rc, matching both hwc_proxy and
+  power-aidl-rockchip precedent — restriction is the SELinux domain
+  transition (init_daemon_domain), not the Linux uid, and only
+  hal_uhf_default may touch a node labelled uhf_device regardless of
+  what else also happens to run as root or system.
+- uhf_hal.mk inherited from device/rockchip/rk3576/rk3576_u/rk3576_u.mk
+  specifically (a separate commit in that repo), not from the shared
+  device/rockchip/common/device.mk the way hwc_proxy_service.mk is —
+  not every Rockchip board has this reader.
+
+UhfReader.cpp and UhfWireProtocol.h: UhfWireProtocol.h is a deliberate,
+close port of com.android.server.uhf.UhfProtocol CRC16/frame/scan/resync
+logic (37 passing JUnit tests cover that algorithm on the Java side).
+UhfReader.cpp reuses it for transact() multi-frame assembly and the
+streaming pump loop, rather than reimplementing frame handling a second
+time with its own bugs to find. Status-to-error mapping and payload
+decoding stay in Java (UhfHalTransport / UhfSessionArbiter), matching
+SRS §3.2 "HAL stays thin" design.
+
+STATUS: none of this has been built or run. No framework or vendor build
+was attempted (would need the aidl_interface plus cc_binary toolchain),
+and there is no reader attached to this environment regardless. The one
+piece of it that inherits real confidence rather than none is
+UhfWireProtocol.h, by virtue of being a faithful port of tested code —
+everything else here (the termios usage, the AIDL/Binder plumbing, the
+sepolicy) is standard-shaped but unverified, exactly like UHF-SRS-001 own
+Confirm status on a command code: written from the best evidence
+available, not yet exercised against the real thing.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/Android.bp                               |  32 ++
+ aidl/default/Android.bp                       |  26 ++
+ aidl/default/UhfReader.cpp                    | 292 ++++++++++++++++++
+ aidl/default/UhfReader.h                      |  77 +++++
+ aidl/default/UhfWireProtocol.h                | 141 +++++++++
+ .../frameworks_rockchip.uhf-service.xml       |  10 +
+ aidl/default/rockchip.uhf-service.rc          |  11 +
+ aidl/default/rockchip.uhf-service.xml         |  10 +
+ aidl/default/sepolicy/file_contexts           |   4 +
+ aidl/default/sepolicy/hal_uhf.te              |  30 ++
+ aidl/default/sepolicy/service.te              |   4 +
+ aidl/default/sepolicy/service_contexts        |   3 +
+ aidl/default/service.cpp                      |  43 +++
+ aidl/rockchip/uhf/aidl/IUhfReader.aidl        |  56 ++++
+ .../rockchip/uhf/aidl/IUhfReaderCallback.aidl |  34 ++
+ uhf_hal.mk                                    |  14 +
+ 16 files changed, 787 insertions(+)
+ create mode 100644 aidl/Android.bp
+ create mode 100644 aidl/default/Android.bp
+ create mode 100644 aidl/default/UhfReader.cpp
+ create mode 100644 aidl/default/UhfReader.h
+ create mode 100644 aidl/default/UhfWireProtocol.h
+ create mode 100644 aidl/default/frameworks_rockchip.uhf-service.xml
+ create mode 100644 aidl/default/rockchip.uhf-service.rc
+ create mode 100644 aidl/default/rockchip.uhf-service.xml
+ create mode 100644 aidl/default/sepolicy/file_contexts
+ create mode 100644 aidl/default/sepolicy/hal_uhf.te
+ create mode 100644 aidl/default/sepolicy/service.te
+ create mode 100644 aidl/default/sepolicy/service_contexts
+ create mode 100644 aidl/default/service.cpp
+ create mode 100644 aidl/rockchip/uhf/aidl/IUhfReader.aidl
+ create mode 100644 aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+ create mode 100644 uhf_hal.mk
+
+diff --git a/aidl/Android.bp b/aidl/Android.bp
+new file mode 100644
+index 0000000..cdcd025
+--- /dev/null
++++ b/aidl/Android.bp
+@@ -0,0 +1,32 @@
++//
++// UHF-SRS-001 Phase 2: the vendor AIDL boundary between UhfService (system_server) and the
++// reader. Named rockchip.uhf.aidl, not android.hardware.uhf, per this tree's own convention for a
++// Rockchip-specific (non-Treble-core) interface — see hardware/rockchip/hwc_proxy_service/ for
++// the precedent this mirrors: aidl_interface module name, source layout under a package-shaped
++// directory, and stability: "vintf" for the same reason hwc.proxy declares it.
++//
++aidl_interface {
++    name: "rockchip.uhf.aidl",
++    vendor_available: true,
++    srcs: [
++        "rockchip/uhf/aidl/*.aidl",
++    ],
++    stability: "vintf",
++    backend: {
++        java: {
++            platform_apis: true,
++        },
++        cpp: {
++            enabled: false,
++        },
++        ndk: {
++            enabled: true,
++        },
++    },
++    versions_with_info: [
++        {
++            version: "1",
++            imports: [],
++        },
++    ],
++}
+diff --git a/aidl/default/Android.bp b/aidl/default/Android.bp
+new file mode 100644
+index 0000000..4167c41
+--- /dev/null
++++ b/aidl/default/Android.bp
+@@ -0,0 +1,26 @@
++//
++// UHF-SRS-001 Phase 2 default HAL implementation. Mirrors
++// hardware/rockchip/hwc_proxy_service/default/Android.bp's shape (this tree's own precedent for a
++// custom Rockchip AIDL service) rather than a generic template.
++//
++cc_binary {
++    name: "rockchip.uhf-service",
++    relative_install_path: "hw",
++    init_rc: ["rockchip.uhf-service.rc"],
++    vintf_fragments: ["rockchip.uhf-service.xml"],
++    vendor: true,
++    srcs: [
++        "UhfReader.cpp",
++        "service.cpp",
++    ],
++    shared_libs: [
++        "libbase",
++        "liblog",
++        "libbinder_ndk",
++        "rockchip.uhf.aidl-V1-ndk",
++    ],
++    cflags: [
++        "-Wall",
++        "-Werror",
++    ],
++}
+diff --git a/aidl/default/UhfReader.cpp b/aidl/default/UhfReader.cpp
+new file mode 100644
+index 0000000..e940241
+--- /dev/null
++++ b/aidl/default/UhfReader.cpp
+@@ -0,0 +1,292 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "UhfReader.h"
++
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <string.h>
++#include <termios.h>
++#include <unistd.h>
++
++#include <android-base/logging.h>
++
++#include "UhfWireProtocol.h"
++
++namespace aidl {
++namespace rockchip {
++namespace uhf {
++namespace aidl {
++namespace impl {
++
++namespace {
++// Mirrors com.android.server.uhf.UhfProtocol.ERROR_* exactly (§5.5). See UhfHalTransport.java on
++// the Java side for the other half of this contract.
++constexpr int32_t kErrorProtocol = 4;
++constexpr int32_t kErrorTimeout = 6;
++constexpr int32_t kErrorDeviceLost = 7;
++
++// FR-LNK-01.
++constexpr const char* kDevicePath = "/dev/ttyUSB0"; // see OI-05 on narrowing this match
++constexpr speed_t kBaudRate = B115200;
++constexpr int64_t kInterByteGapNanos = 15'000'000; // FR-LNK-05
++constexpr int kReadPollTimeoutMs = 500;
++constexpr int kMaxTransactRetries = 2;
++
++int64_t nowNanos() {
++    timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return static_cast<int64_t>(ts.tv_sec) * 1'000'000'000LL + ts.tv_nsec;
++}
++
++// Returns bytes read (0 on timeout/no data), matching UhfSerialTransport.nativeRead()'s contract.
++ssize_t pollAndRead(int fd, uint8_t* buf, size_t offset, size_t length, int timeoutMs) {
++    pollfd pfd{fd, POLLIN, 0};
++    int r = poll(&pfd, 1, timeoutMs);
++    if (r <= 0) {
++        return 0;
++    }
++    ssize_t n = ::read(fd, buf + offset, length);
++    return n > 0 ? n : 0;
++}
++}  // namespace
++
++UhfReader::UhfReader() = default;
++
++UhfReader::~UhfReader() {
++    close();
++}
++
++::ndk::ScopedAStatus UhfReader::isOpen(bool* _aidl_return) {
++    std::lock_guard<std::mutex> lock(mIoLock);
++    *_aidl_return = mFd >= 0;
++    return ::ndk::ScopedAStatus::ok();
++}
++
++::ndk::ScopedAStatus UhfReader::open() {
++    std::lock_guard<std::mutex> lock(mIoLock);
++    if (mFd >= 0) {
++        return ::ndk::ScopedAStatus::ok(); // idempotent, per the interface's Java-side contract
++    }
++    int fd = ::open(kDevicePath, O_RDWR | O_NOCTTY);
++    if (fd < 0) {
++        LOG(ERROR) << "open(" << kDevicePath << ") failed: " << strerror(errno);
++        return ::ndk::ScopedAStatus::fromServiceSpecificError(kErrorDeviceLost);
++    }
++    termios tty{};
++    if (tcgetattr(fd, &tty) != 0) {
++        ::close(fd);
++        return ::ndk::ScopedAStatus::fromServiceSpecificError(kErrorDeviceLost);
++    }
++    cfmakeraw(&tty);
++    cfsetispeed(&tty, kBaudRate);
++    cfsetospeed(&tty, kBaudRate);
++    tty.c_cflag |= (CLOCAL | CREAD);
++    tty.c_cc[VMIN] = 0;
++    tty.c_cc[VTIME] = 0;
++    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
++        ::close(fd);
++        return ::ndk::ScopedAStatus::fromServiceSpecificError(kErrorDeviceLost);
++    }
++    tcflush(fd, TCIOFLUSH);
++    mFd = fd;
++    return ::ndk::ScopedAStatus::ok();
++}
++
++::ndk::ScopedAStatus UhfReader::close() {
++    {
++        std::lock_guard<std::mutex> lock(mIoLock);
++        if (mFd < 0) {
++            return ::ndk::ScopedAStatus::ok();
++        }
++    }
++    stopStream();
++    std::lock_guard<std::mutex> lock(mIoLock);
++    ::close(mFd);
++    mFd = -1;
++    return ::ndk::ScopedAStatus::ok();
++}
++
++::ndk::ScopedAStatus UhfReader::requireOpenLocked() {
++    if (mFd < 0) {
++        return ::ndk::ScopedAStatus::fromServiceSpecificError(kErrorDeviceLost);
++    }
++    return ::ndk::ScopedAStatus::ok();
++}
++
++::ndk::ScopedAStatus UhfReader::transact(int32_t command, const std::vector<uint8_t>& payload,
++                                          int32_t timeoutMs, std::vector<uint8_t>* _aidl_return) {
++    std::vector<uint8_t> frame = rockchip::uhf::buildFrame(rockchip::uhf::kAddressBroadcast,
++                                                            command, payload);
++    ::ndk::ScopedAStatus lastFailure = ::ndk::ScopedAStatus::ok();
++    for (int attempt = 0; attempt <= kMaxTransactRetries; attempt++) {
++        std::lock_guard<std::mutex> lock(mIoLock);
++        auto openStatus = requireOpenLocked();
++        if (!openStatus.isOk()) {
++            return openStatus;
++        }
++        tcflush(mFd, TCIFLUSH); // FR-LNK-08
++        if (::write(mFd, frame.data(), frame.size()) != static_cast<ssize_t>(frame.size())) {
++            LOG(WARNING) << "short write on transact(0x" << std::hex << command << ")";
++        }
++
++        std::vector<uint8_t> multiFrameData;
++        uint8_t buf[4096];
++        size_t len = 0;
++        int64_t deadline = nowNanos() + static_cast<int64_t>(timeoutMs) * 1'000'000;
++        int64_t lastByteAt = nowNanos();
++        bool timedOut = false;
++
++        while (nowNanos() < deadline) {
++            int remainingMs = static_cast<int>((deadline - nowNanos()) / 1'000'000);
++            ssize_t n = pollAndRead(mFd, buf, len, sizeof(buf) - len,
++                                     std::min(kReadPollTimeoutMs, std::max(0, remainingMs)));
++            if (n > 0) {
++                len += n;
++                lastByteAt = nowNanos();
++            }
++            bool stale = (nowNanos() - lastByteAt) > kInterByteGapNanos;
++
++            size_t offset = 0;
++            bool gotReply = false;
++            while (offset < len) {
++                auto r = rockchip::uhf::scanWithStallRecovery(buf + offset, len - offset, stale);
++                if (r.outcome == rockchip::uhf::ScanOutcome::kNeedMoreData) {
++                    break;
++                }
++                if (r.outcome == rockchip::uhf::ScanOutcome::kResync) {
++                    offset += r.bytesToDiscard;
++                    continue;
++                }
++                offset += r.frame.wireLength;
++                if (!rockchip::uhf::reCmdMatches(r.frame, command)) {
++                    continue; // FR-LNK-06: e.g. an interleaved 0xEE real-time tag frame
++                }
++                int status = !r.frame.data.empty() ? r.frame.data[0] : 0x01;
++                multiFrameData.insert(multiFrameData.end(), r.frame.data.begin(),
++                                       r.frame.data.end());
++                if (status != 0x03 /* STATUS_MORE_FRAMES_FOLLOW, FR-INV-02 */) {
++                    *_aidl_return = multiFrameData;
++                    gotReply = true;
++                    break;
++                }
++            }
++            if (gotReply) {
++                return ::ndk::ScopedAStatus::ok();
++            }
++            if (offset > 0) {
++                memmove(buf, buf + offset, len - offset);
++                len -= offset;
++            }
++        }
++        timedOut = true;
++        (void)timedOut;
++        lastFailure = ::ndk::ScopedAStatus::fromServiceSpecificError(kErrorTimeout);
++    }
++    return lastFailure;
++}
++
++::ndk::ScopedAStatus UhfReader::startStream(const std::shared_ptr<IUhfReaderCallback>& callback) {
++    std::lock_guard<std::mutex> lock(mIoLock);
++    auto openStatus = requireOpenLocked();
++    if (!openStatus.isOk()) {
++        return openStatus;
++    }
++    if (mStreaming.load()) {
++        return ::ndk::ScopedAStatus::ok();
++    }
++    std::vector<uint8_t> enter = rockchip::uhf::buildFrame(rockchip::uhf::kAddressBroadcast, 0x76,
++                                                            {0x01});
++    ::write(mFd, enter.data(), enter.size());
++    mStreaming.store(true);
++    mPumpThread = std::thread(&UhfReader::pumpLoop, this, callback);
++    return ::ndk::ScopedAStatus::ok();
++}
++
++::ndk::ScopedAStatus UhfReader::stopStream() {
++    if (!mStreaming.exchange(false)) {
++        return ::ndk::ScopedAStatus::ok();
++    }
++    // FR-STR-07's retry-and-confirm-quiet loop needs a live reader to validate the "confirm
++    // quiet" half against; this sends the stop frame once and joins the pump thread, same
++    // documented gap as the Phase 1 JNI transport had.
++    {
++        std::lock_guard<std::mutex> lock(mIoLock);
++        if (mFd >= 0) {
++            std::vector<uint8_t> stop = rockchip::uhf::buildFrame(
++                    rockchip::uhf::kAddressBroadcast, 0x76, {0x00});
++            ::write(mFd, stop.data(), stop.size());
++        }
++    }
++    if (mPumpThread.joinable()) {
++        mPumpThread.join();
++    }
++    return ::ndk::ScopedAStatus::ok();
++}
++
++void UhfReader::pumpLoop(std::shared_ptr<IUhfReaderCallback> callback) {
++    uint8_t buf[4096];
++    size_t len = 0;
++    int64_t lastByteAt = nowNanos();
++    while (mStreaming.load()) {
++        int fd;
++        {
++            std::lock_guard<std::mutex> lock(mIoLock);
++            fd = mFd;
++        }
++        if (fd < 0) {
++            callback->onError(kErrorDeviceLost);
++            return;
++        }
++        ssize_t n = pollAndRead(fd, buf, len, sizeof(buf) - len, kReadPollTimeoutMs);
++        if (n > 0) {
++            len += n;
++            lastByteAt = nowNanos();
++        }
++        bool stale = (nowNanos() - lastByteAt) > kInterByteGapNanos;
++
++        std::vector<std::vector<uint8_t>> batch;
++        size_t offset = 0;
++        while (offset < len) {
++            auto r = rockchip::uhf::scanWithStallRecovery(buf + offset, len - offset, stale);
++            if (r.outcome == rockchip::uhf::ScanOutcome::kNeedMoreData) {
++                break;
++            }
++            if (r.outcome == rockchip::uhf::ScanOutcome::kResync) {
++                offset += r.bytesToDiscard;
++                continue;
++            }
++            offset += r.frame.wireLength;
++            if (r.frame.command == 0xEE) { // real-time tag frame, UHF-SRS-001 §1.3
++                batch.push_back(r.frame.data);
++            }
++        }
++        if (offset > 0) {
++            memmove(buf, buf + offset, len - offset);
++            len -= offset;
++        }
++        if (!batch.empty()) {
++            callback->onTagBatch(batch);
++        }
++    }
++}
++
++}  // namespace impl
++}  // namespace aidl
++}  // namespace uhf
++}  // namespace rockchip
++}  // namespace aidl
+diff --git a/aidl/default/UhfReader.h b/aidl/default/UhfReader.h
+new file mode 100644
+index 0000000..9cc52d6
+--- /dev/null
++++ b/aidl/default/UhfReader.h
+@@ -0,0 +1,77 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++// Bn*.h is generated by the aidl compiler from ../rockchip/uhf/aidl/*.aidl; found under
++// out/soong/.intermediates/.../aidl_interface/... once this target has actually been built (it
++// has not, in this environment — see service.cpp's header comment).
++#include <aidl/rockchip/uhf/aidl/BnUhfReader.h>
++
++#include <atomic>
++#include <mutex>
++#include <thread>
++
++namespace aidl {
++namespace rockchip {
++namespace uhf {
++namespace aidl {
++namespace impl {
++
++using ::aidl::rockchip::uhf::aidl::BnUhfReader;
++using ::aidl::rockchip::uhf::aidl::IUhfReaderCallback;
++
++/**
++ * UHF-SRS-001 Phase 2 default HAL implementation. Owns the tty and the framing/CRC/resync logic
++ * (via UhfWireProtocol.h, a close port of the tested UhfProtocol.java) and nothing about policy —
++ * that stays in UhfSessionArbiter on the system_server side of this Binder boundary.
++ *
++ * STATUS: written, not built or run — see this directory's service.cpp for the full caveat this
++ * class shares with UhfWireProtocol.h and the rest of this HAL.
++ */
++class UhfReader : public BnUhfReader {
++public:
++    UhfReader();
++    ~UhfReader() override;
++
++    ::ndk::ScopedAStatus isOpen(bool* _aidl_return) override;
++    ::ndk::ScopedAStatus open() override;
++    ::ndk::ScopedAStatus close() override;
++    ::ndk::ScopedAStatus transact(int32_t command, const std::vector<uint8_t>& payload,
++                                   int32_t timeoutMs, std::vector<uint8_t>* _aidl_return) override;
++    ::ndk::ScopedAStatus startStream(
++            const std::shared_ptr<IUhfReaderCallback>& callback) override;
++    ::ndk::ScopedAStatus stopStream() override;
++
++private:
++    void pumpLoop(std::shared_ptr<IUhfReaderCallback> callback);
++    ::ndk::ScopedAStatus requireOpenLocked();
++
++    std::mutex mIoLock; // guards mFd against a concurrent close(); see UhfSessionArbiter's class
++                         // doc on the Java side for why transact()/startStream() calls don't need
++                         // their own transaction-level lock here — the arbiter already serializes
++                         // them (NFR-C-01) before they ever reach this Binder boundary.
++    int mFd = -1; // -1 == not open
++
++    std::atomic<bool> mStreaming{false};
++    std::thread mPumpThread;
++};
++
++}  // namespace impl
++}  // namespace aidl
++}  // namespace uhf
++}  // namespace rockchip
++}  // namespace aidl
+diff --git a/aidl/default/UhfWireProtocol.h b/aidl/default/UhfWireProtocol.h
+new file mode 100644
+index 0000000..762733f
+--- /dev/null
++++ b/aidl/default/UhfWireProtocol.h
+@@ -0,0 +1,141 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#pragma once
++
++#include <cstdint>
++#include <vector>
++
++namespace rockchip {
++namespace uhf {
++
++// A deliberate, close port of com.android.server.uhf.UhfProtocol's CRC16/frame/resync logic
++// (frameworks/base/services/core/java/com/android/server/uhf/UhfProtocol.java), which carries 37
++// passing host-side JUnit tests covering exactly this algorithm — the fuzz test over 1MB of
++// random bytes, the CRC-corrupted-frame stall-recovery case, the reCmd-vs-CRC distinction. This
++// header is NOT independently tested in C++ in this pass (no build of this HAL has been attempted
++// here, per this file's own service implementation's header comment); its correctness claim rests
++// entirely on being a faithful, line-for-line-equivalent port of the Java version that is tested,
++// not on any verification of its own. Keep it that way: if the two ever diverge, treat the Java
++// version as the source of truth and re-port, rather than fixing them independently.
++//
++// Only the subset UhfReader.cpp actually needs is ported: CRC16, frame build, and scan/resync.
++// Status-to-error mapping and payload decoding (0x21, tag records) stay in Java — UhfHalTransport
++// and UhfSessionArbiter do that, the same as they did with the Phase 1 JNI transport, since the
++// HAL's job per SRS §3.2 is framing and timing, not interpreting payload contents.
++
++constexpr int kMinLenField = 4;
++constexpr int kMaxLenField = 0xFF;
++constexpr int kAddressBroadcast = 0xFF;
++constexpr uint16_t kCrc16Init = 0xFFFF; // CRC-16/MODBUS; see UhfProtocol.java's doc on this being
++                                         // an inference pending R1, isolated to one constant.
++
++inline uint16_t crc16(const uint8_t* data, size_t length) {
++    uint32_t crc = kCrc16Init;
++    for (size_t i = 0; i < length; i++) {
++        crc ^= data[i];
++        for (int bit = 0; bit < 8; bit++) {
++            bool lsbSet = (crc & 0x0001) != 0;
++            crc >>= 1;
++            if (lsbSet) {
++                crc ^= 0xA001;
++            }
++        }
++    }
++    return static_cast<uint16_t>(crc & 0xFFFF);
++}
++
++inline bool isCrcValid(const uint8_t* data, size_t length) {
++    return length >= 2 && crc16(data, length) == 0;
++}
++
++// Len | Adr | Cmd | Data[] | CRC16-LSB | CRC16-MSB
++inline std::vector<uint8_t> buildFrame(int address, int command,
++                                        const std::vector<uint8_t>& payload) {
++    size_t len = 2 + payload.size() + 2; // Adr + Cmd + Data + CRC16(2)
++    std::vector<uint8_t> frame(1 + len);
++    frame[0] = static_cast<uint8_t>(len);
++    frame[1] = static_cast<uint8_t>(address);
++    frame[2] = static_cast<uint8_t>(command);
++    std::copy(payload.begin(), payload.end(), frame.begin() + 3);
++    uint16_t crc = crc16(frame.data(), 3 + payload.size());
++    frame[3 + payload.size()] = static_cast<uint8_t>(crc & 0xFF);
++    frame[3 + payload.size() + 1] = static_cast<uint8_t>((crc >> 8) & 0xFF);
++    return frame;
++}
++
++struct Frame {
++    int address;
++    int command;
++    std::vector<uint8_t> data;
++    size_t wireLength;
++};
++
++enum class ScanOutcome { kFrame, kNeedMoreData, kResync };
++
++struct ScanResult {
++    ScanOutcome outcome;
++    Frame frame;         // valid only when outcome == kFrame
++    size_t bytesToDiscard = 0; // valid only when outcome == kResync
++};
++
++// Mirrors UhfProtocol.scan() exactly: a length byte below kMinLenField is unrecoverable garbage
++// (discard 1, rescan); a structurally complete candidate whose CRC fails is discarded the same
++// way, one byte at a time, never assumed "nearly right" and repaired.
++inline ScanResult scan(const uint8_t* buf, size_t length) {
++    if (length == 0) {
++        return {ScanOutcome::kNeedMoreData, {}, 0};
++    }
++    int lenField = buf[0];
++    if (lenField < kMinLenField) {
++        return {ScanOutcome::kResync, {}, 1};
++    }
++    size_t wireLength = 1 + static_cast<size_t>(lenField);
++    if (length < wireLength) {
++        return {ScanOutcome::kNeedMoreData, {}, 0};
++    }
++    if (!isCrcValid(buf, wireLength)) {
++        return {ScanOutcome::kResync, {}, 1};
++    }
++    Frame f;
++    f.address = buf[1];
++    f.command = buf[2];
++    f.wireLength = wireLength;
++    size_t dataLen = static_cast<size_t>(lenField) - 4;
++    f.data.assign(buf + 3, buf + 3 + dataLen);
++    return {ScanOutcome::kFrame, f, 0};
++}
++
++// Mirrors UhfProtocol.scanWithStallRecovery(): pairs frame recovery with FR-LNK-05's inter-byte
++// timeout so a length byte that merely *looks* valid but is actually corrupted receive noise does
++// not stall the parser forever once no more bytes are coming.
++inline ScanResult scanWithStallRecovery(const uint8_t* buf, size_t length, bool staleTimeoutElapsed) {
++    ScanResult r = scan(buf, length);
++    if (r.outcome == ScanOutcome::kNeedMoreData && length > 0 && staleTimeoutElapsed) {
++        return {ScanOutcome::kResync, {}, 1};
++    }
++    return r;
++}
++
++// FR-LNK-06: a reply is only the answer to sentCommand if its echoed command matches — a
++// structurally valid, CRC-correct frame is not enough (an interleaved real-time tag frame passes
++// both those checks too).
++inline bool reCmdMatches(const Frame& reply, int sentCommand) {
++    return reply.command == sentCommand;
++}
++
++}  // namespace uhf
++}  // namespace rockchip
+diff --git a/aidl/default/frameworks_rockchip.uhf-service.xml b/aidl/default/frameworks_rockchip.uhf-service.xml
+new file mode 100644
+index 0000000..a754a8a
+--- /dev/null
++++ b/aidl/default/frameworks_rockchip.uhf-service.xml
+@@ -0,0 +1,10 @@
++<compatibility-matrix version="1.0" type="framework">
++    <hal format="aidl" optional="true">
++        <name>rockchip.uhf.aidl</name>
++        <version>1</version>
++        <interface>
++            <name>IUhfReader</name>
++            <instance>default</instance>
++        </interface>
++    </hal>
++</compatibility-matrix>
+diff --git a/aidl/default/rockchip.uhf-service.rc b/aidl/default/rockchip.uhf-service.rc
+new file mode 100644
+index 0000000..8b9f71a
+--- /dev/null
++++ b/aidl/default/rockchip.uhf-service.rc
+@@ -0,0 +1,11 @@
++service vendor.uhf-hal /vendor/bin/hw/rockchip.uhf-service
++    class hal
++    user root
++    group system
++
++# NFR-S-01 is enforced by the SELinux domain transition (init_daemon_domain(hal_uhf_default) in
++# hal_uhf.te), not by the Linux uid/gid above — this matches the two other custom AIDL services
++# already in this tree (power-aidl-rockchip.rc, rockchip.hwc.proxy-service.rc), both of which also
++# run as user root/group system and rely on their sepolicy domain for restriction. Only a process
++# actually transitioned into hal_uhf_default may open a node labelled uhf_device, regardless of
++# what other processes also happen to run as root/system.
+diff --git a/aidl/default/rockchip.uhf-service.xml b/aidl/default/rockchip.uhf-service.xml
+new file mode 100644
+index 0000000..5ee5e61
+--- /dev/null
++++ b/aidl/default/rockchip.uhf-service.xml
+@@ -0,0 +1,10 @@
++<manifest version="1.0" type="device">
++    <hal format="aidl">
++        <name>rockchip.uhf.aidl</name>
++        <version>1</version>
++        <interface>
++            <name>IUhfReader</name>
++            <instance>default</instance>
++        </interface>
++    </hal>
++</manifest>
+diff --git a/aidl/default/sepolicy/file_contexts b/aidl/default/sepolicy/file_contexts
+new file mode 100644
+index 0000000..60b9dac
+--- /dev/null
++++ b/aidl/default/sepolicy/file_contexts
+@@ -0,0 +1,4 @@
++# The service binary's label — portable across any board using this HAL. The reader's *device
++# node* label (uhf_device) is board-specific instead, since which tty it enumerates on is a board
++# property — see device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts.
++/vendor/bin/hw/rockchip\.uhf-service u:object_r:hal_uhf_default_exec:s0
+diff --git a/aidl/default/sepolicy/hal_uhf.te b/aidl/default/sepolicy/hal_uhf.te
+new file mode 100644
+index 0000000..2282022
+--- /dev/null
++++ b/aidl/default/sepolicy/hal_uhf.te
+@@ -0,0 +1,30 @@
++# UHF-SRS-001 NFR-S-01/S-05. Mirrors hardware/rockchip/hwc_proxy_service's sepolicy shape (this
++# tree's own precedent for a custom AIDL HAL) with Treble's standard hal_<x>_default naming for
++# the domain, since this is a HAL default implementation in the Treble sense (§3.2/§3.4).
++
++type hal_uhf_default, domain;
++type hal_uhf_default_exec, exec_type, vendor_file_type, file_type;
++
++# Declared here (board-independent) so that any board using this HAL can label its own reader
++# device node with it — see device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts for the
++# board-specific path this type actually gets attached to.
++type uhf_device, dev_type, file_type;
++
++init_daemon_domain(hal_uhf_default)
++binder_use(hal_uhf_default)
++
++hal_attribute(uhf)
++hal_server_domain(hal_uhf_default, hal_uhf)
++hal_attribute_service(hal_uhf, hal_uhf_service)
++
++binder_call(hal_uhf_client, hal_uhf_server)
++binder_call(hal_uhf_server, hal_uhf_client)
++
++# NFR-S-01: only this domain may touch the reader's device node.
++allow hal_uhf_default uhf_device:chr_file rw_file_perms;
++
++# system_server is a client of this HAL (UhfHalTransport binds to rockchip.uhf.aidl.IUhfReader),
++# but system_server must NOT itself hold the device node open — that is exactly the Treble
++# layering violation §3.2 exists to avoid. hal_client_domain grants Binder-call permission only;
++# it grants nothing over uhf_device.
++hal_client_domain(system_server, hal_uhf)
+diff --git a/aidl/default/sepolicy/service.te b/aidl/default/sepolicy/service.te
+new file mode 100644
+index 0000000..0bbc4c5
+--- /dev/null
++++ b/aidl/default/sepolicy/service.te
+@@ -0,0 +1,4 @@
++# Required because this AIDL service is NDK-backend (registered via AServiceManager_addService,
++# not a HIDL hwservicemanager entry) — matches hardware/rockchip/hwc_proxy_service's precedent for
++# exactly the same reason (see its service.te's own comment).
++type hal_uhf_service, protected_service, hal_service_type, service_manager_type;
+diff --git a/aidl/default/sepolicy/service_contexts b/aidl/default/sepolicy/service_contexts
+new file mode 100644
+index 0000000..1a1bac6
+--- /dev/null
++++ b/aidl/default/sepolicy/service_contexts
+@@ -0,0 +1,3 @@
++# Binds the AIDL instance string (matches UhfReader::descriptor + "/default" in service.cpp, and
++# what UhfHalTransport.java resolves on the Java side) to its security context.
++rockchip.uhf.aidl.IUhfReader/default        u:object_r:hal_uhf_service:s0
+diff --git a/aidl/default/service.cpp b/aidl/default/service.cpp
+new file mode 100644
+index 0000000..7c6ffe9
+--- /dev/null
++++ b/aidl/default/service.cpp
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ * STATUS: this whole default/ directory is written, not built or run. Compiling it would need
++ * `m rockchip.uhf-service` against the full framework (per this patch series' cover note, that
++ * was not attempted in this session), and there is no reader attached to this environment to
++ * exercise it against even if it were built. UhfWireProtocol.h's doc explains what that does and
++ * does not mean for the one piece of logic here worth trusting anyway: it is a close port of
++ * already-tested Java, not new unverified logic.
++ */
++
++#include <android-base/logging.h>
++#include <android/binder_manager.h>
++#include <android/binder_process.h>
++
++#include "UhfReader.h"
++
++using ::aidl::rockchip::uhf::aidl::impl::UhfReader;
++
++int main() {
++    ABinderProcess_setThreadPoolMaxThreadCount(1); // one transaction at a time; NFR-C-01
++    std::shared_ptr<UhfReader> reader = ndk::SharedRefBase::make<UhfReader>();
++
++    const std::string instance = std::string() + UhfReader::descriptor + "/default";
++    binder_status_t status =
++            AServiceManager_addService(reader->asBinder().get(), instance.c_str());
++    CHECK_EQ(status, STATUS_OK);
++
++    ABinderProcess_joinThreadPool();
++    return EXIT_FAILURE; // should not reach
++}
+diff --git a/aidl/rockchip/uhf/aidl/IUhfReader.aidl b/aidl/rockchip/uhf/aidl/IUhfReader.aidl
+new file mode 100644
+index 0000000..1b7e51a
+--- /dev/null
++++ b/aidl/rockchip/uhf/aidl/IUhfReader.aidl
+@@ -0,0 +1,56 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package rockchip.uhf.aidl;
++
++import rockchip.uhf.aidl.IUhfReaderCallback;
++
++/**
++ * UHF-SRS-001 §5.3/§3.2: the vendor process's interface, deliberately as thin as the SRS asks for
++ * it to be — it owns framing, CRC16, resync and timing (the parts that must be close to the wire)
++ * and nothing about policy, permissions, or session arbitration (UhfSessionArbiter's job, on the
++ * system_server side of this boundary). A new reader command needs no change here at all: it is
++ * just a different {@code command}/{@code payload} to {@link #transact}.
++ *
++ * <p>This intentionally mirrors {@code com.android.server.uhf.UhfTransport} (the Phase 1 JNI
++ * interface) method-for-method, so that {@code UhfHalTransport} — the Phase 2 implementation of
++ * that same Java interface — is a thin Binder proxy and {@code UhfSessionArbiter} does not change
++ * at all across the Phase 1/2 boundary, exactly as SRS §3.2 intends.
++ */
++@VintfStability
++interface IUhfReader {
++    boolean isOpen();
++
++    void open();
++
++    void close();
++
++    /**
++     * Sends one framed command and returns its payload once a reply whose {@code reCmd} matches
++     * {@code command} has been received, or throws a {@link android.os.ServiceSpecificException}
++     * with one of the stable error codes (matching {@code UhfTransportException}'s) on timeout or
++     * a reader-reported error status. Multi-frame replies (status 0x03) are assembled here; the
++     * caller sees one concatenated result — FR-INV-02.
++     */
++    byte[] transact(int command, in byte[] payload, int timeoutMs);
++
++    /** Enters real-time streaming mode and delivers batches to {@code callback} until
++     * {@link #stopStream}. Returns once mode entry is acknowledged. */
++    void startStream(IUhfReaderCallback callback);
++
++    /** FR-STR-07: retries the stop frame and confirms the port has gone quiet before returning. */
++    void stopStream();
++}
+diff --git a/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl b/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+new file mode 100644
+index 0000000..f026658
+--- /dev/null
++++ b/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+@@ -0,0 +1,34 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package rockchip.uhf.aidl;
++
++/**
++ * Delivery from the HAL's pump thread to {@code UhfHalTransport} in system_server.
++ * {@code oneway}: per UHF-SRS-001 §3.3, the pump thread must never block on system_server being
++ * slow to drain a batch.
++ */
++@VintfStability
++oneway interface IUhfReaderCallback {
++    /** One batch of raw, still-undecoded tag-record payloads (post status-byte-stripping) — the
++     * same shape {@code UhfTransport.StreamCallback#onTagBatch} already expects, so
++     * {@code UhfHalTransport} passes these straight through to {@code UhfProtocol.decodeTagRecords}
++     * without change. */
++    void onTagBatch(in byte[][] rawTagRecords);
++
++    /** {@code errorCode} matches {@code UhfTransportException}'s stable error codes. */
++    void onError(int errorCode);
++}
+diff --git a/uhf_hal.mk b/uhf_hal.mk
+new file mode 100644
+index 0000000..4ba07eb
+--- /dev/null
++++ b/uhf_hal.mk
+@@ -0,0 +1,14 @@
++# UHF-SRS-001 Phase 2. Mirrors hardware/rockchip/hwc_proxy_service/hwc_proxy_service.mk's shape —
++# this tree's own precedent for how a custom Rockchip AIDL service gets pulled into a product.
++#
++# Unlike hwc_proxy_service.mk (inherited from the shared device/rockchip/common/device.mk, so it
++# ships on every Rockchip board), THIS file is inherited only from
++# device/rockchip/rk3576/rk3576_u/rk3576_u.mk — not every Rockchip board has this reader attached.
++
++PRODUCT_PACKAGES += \
++    rockchip.uhf-service
++
++DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE += \
++    hardware/rockchip/uhf/aidl/default/frameworks_rockchip.uhf-service.xml
++
++BOARD_SEPOLICY_DIRS += hardware/rockchip/uhf/aidl/default/sepolicy
+-- 
+2.34.1
+

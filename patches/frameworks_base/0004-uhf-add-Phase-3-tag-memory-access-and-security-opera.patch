@@ -1,0 +1,1343 @@
+From 62f5c8e32e3aa3e38ee9fd5211084f42dfdd2534 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Tue, 15 Sep 2026 10:05:43 +0200
+Subject: [PATCH 4/4] uhf: add Phase 3 tag memory access and security
+ operations (SRS sect4.10-4.11)
+
+Extends the AIDL/Manager/Session/arbiter/service stack from Phase 1/2 with
+readTagMemory, writeTagMemory, writeEpc, blockWrite, blockErase,
+setVerifyWrites, killTag, lockTag, setAccessPassword and setKillPassword,
+plus the new TagFilter Parcelable and the UHF_WRITE permission (its own
+permission-group, since every dangerous permission in this manifest has
+one).
+
+What is and is not implemented with confidence here, deliberately kept
+separate:
+
+- Real, tested policy logic in UhfSessionArbiter: FR-MEM-06 word-range
+  validation (including rejecting an odd-length data array instead of
+  silently truncating it via integer division - caught by writing the
+  test for it), FR-MEM-07 read-back write verification (on by default),
+  FR-SEC-02 (an all-zero kill password is refused, not honoured),
+  FR-SEC-04 (a permanent lock state requires explicit confirmation),
+  FR-SEC-07 (every irreversible op is audited), and FR-STR-13 routing
+  (all of these stop-apply-restart around an active stream, same as
+  antenna/inventory ops). 26 new tests, 92/92 total passing.
+
+- Wire payload encoding (buildTagOpPayload): explicitly UNVERIFIED,
+  Confirm status pending OI-01 exactly like the SRS's own R1-pending
+  command codes. This reader family's manual was not available when this
+  was written, so the byte layout is a plausible, simple, clearly-isolated
+  guess - the same posture as inventory()'s optional-triple encoding in
+  the Phase 1 commit, not a new relaxation of standards. Read
+  protection/EAS/vendor-extensions (sect4.12-4.14) are not implemented at
+  all rather than guessed at with even less to go on than this section had.
+
+UhfService: converts the framework TagFilter Parcelable to the arbiter's
+framework-independent TagFilterSpec at the Binder boundary, matching the
+pattern already established for UhfReaderInfo/InventoryParams. Cross-
+checked by script, not by eye, exactly as the Phase 1/2 commits did:
+every AIDL method (32) has exactly one BinderService override, every
+UhfManager/UhfSession call matches the AIDL 1:1, every mArbiter.* call
+matches an arbiter method 1:1. No mismatches found this round.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/hardware/uhf/IUhfService.aidl     |  44 ++-
+ core/java/android/hardware/uhf/TagFilter.java | 151 ++++++++++
+ .../java/android/hardware/uhf/UhfSession.java | 141 +++++++++
+ core/res/AndroidManifest.xml                  |  19 ++
+ core/res/res/drawable/perm_group_uhf.xml      |  29 ++
+ core/res/res/values/strings.xml               |  11 +
+ .../com/android/server/uhf/UhfService.java    | 182 ++++++++++-
+ .../android/server/uhf/UhfSessionArbiter.java | 282 ++++++++++++++++++
+ .../server/uhf/UhfSessionArbiterTest.java     | 262 ++++++++++++++++
+ 9 files changed, 1116 insertions(+), 5 deletions(-)
+ create mode 100644 core/java/android/hardware/uhf/TagFilter.java
+ create mode 100644 core/res/res/drawable/perm_group_uhf.xml
+
+diff --git a/core/java/android/hardware/uhf/IUhfService.aidl b/core/java/android/hardware/uhf/IUhfService.aidl
+index 4fad30fa..0424b314 100644
+--- a/core/java/android/hardware/uhf/IUhfService.aidl
++++ b/core/java/android/hardware/uhf/IUhfService.aidl
+@@ -21,15 +21,18 @@ import android.hardware.uhf.IUhfTagCallback;
+ import android.hardware.uhf.InventoryParams;
+ import android.hardware.uhf.StreamParams;
+ import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.TagFilter;
+ import android.hardware.uhf.UhfDeviceInfo;
+ import android.hardware.uhf.UhfReaderInfo;
+ import android.hardware.uhf.UhfTag;
+ 
+ /**
+  * Binder interface behind {@code UhfManager}/{@code UhfSession}, implemented by
+- * {@code com.android.server.uhf.UhfService}. UHF-SRS-001 Phase 1 scope only (§4.1-4.8); tag
+- * memory/security/protection/EAS/peripherals/diagnostics (§4.9-4.16) are added in later phases
+- * without needing to change any method declared here.
++ * {@code com.android.server.uhf.UhfService}. Covers UHF-SRS-001 §4.1-4.11 (Phase 1's lifecycle
++ * through inventory/streaming, plus Phase 3's tag memory access and security operations).
++ * Read protection/EAS/vendor-extensions/peripherals/diagnostics (§4.12-4.16) are not yet
++ * implemented — their wire payloads are unspecified beyond a command byte (SRS Confirm status)
++ * and were left for when real hardware can confirm them, rather than guessed at wholesale.
+  *
+  * <p>Every non-oneway method here may throw {@link android.os.ServiceSpecificException} with one
+  * of {@code UhfException.ERROR_*} as its code; {@code UhfManager}/{@code UhfSession} catch it and
+@@ -104,4 +107,39 @@ interface IUhfService {
+     StreamStats getStreamStats(IBinder sessionToken);
+ 
+     void resetStreamStats(IBinder sessionToken);
++
++    // ---- §4.10 Tag memory access, §4.11 Tag security (Phase 3) ----
++    // All of these are governed by FR-STR-13: an active stream is stopped first and restarted
++    // afterward if the caller had not explicitly stopped it, the same as §4.9's buffered
++    // inventory. UHF_WRITE-gated except readTagMemory (UHF_READ; reading is not writing).
++
++    byte[] readTagMemory(IBinder sessionToken, in TagFilter filter, int bank, int wordAddress,
++            int wordCount);
++
++    void writeTagMemory(IBinder sessionToken, in TagFilter filter, int bank, int wordAddress,
++            in byte[] data);
++
++    void writeEpc(IBinder sessionToken, in TagFilter filter, in byte[] newEpc);
++
++    void blockWrite(IBinder sessionToken, in TagFilter filter, int bank, int wordAddress,
++            in byte[] data);
++
++    void blockErase(IBinder sessionToken, in TagFilter filter, int bank, int wordAddress,
++            int wordCount);
++
++    void setVerifyWrites(IBinder sessionToken, boolean verify);
++
++    /** FR-SEC-02: rejected if {@code killPassword} is all zeros. */
++    void killTag(IBinder sessionToken, in TagFilter filter, in byte[] killPassword);
++
++    /** FR-SEC-04: {@code confirmIrreversible} must be {@code true} to request one of the two
++     * permanent lock states. */
++    void lockTag(IBinder sessionToken, in TagFilter filter, int region, int lockState,
++            in byte[] accessPassword, boolean confirmIrreversible);
++
++    void setAccessPassword(IBinder sessionToken, in TagFilter filter, in byte[] oldPassword,
++            in byte[] newPassword);
++
++    void setKillPassword(IBinder sessionToken, in TagFilter filter, in byte[] accessPassword,
++            in byte[] newKillPassword);
+ }
+diff --git a/core/java/android/hardware/uhf/TagFilter.java b/core/java/android/hardware/uhf/TagFilter.java
+new file mode 100644
+index 00000000..f3b65dd0
+--- /dev/null
++++ b/core/java/android/hardware/uhf/TagFilter.java
+@@ -0,0 +1,151 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++import android.annotation.NonNull;
++import android.annotation.Nullable;
++import android.annotation.SystemApi;
++import android.os.Parcel;
++import android.os.Parcelable;
++
++/**
++ * Selects which tag a §4.10-4.13 memory/security/protection operation targets, per UHF-SRS-001's
++ * §4.10 code sample. {@link #any()} is only valid when the caller already knows exactly one tag
++ * is in field — the service does not resolve ambiguity for the caller.
++ *
++ * @hide
++ */
++@SystemApi
++public final class TagFilter implements Parcelable {
++
++    private static final int KIND_EPC = 0;
++    private static final int KIND_TID = 1;
++    private static final int KIND_ANY = 2;
++
++    private final int mKind;
++    private final byte[] mEpc;
++    private final byte[] mTid;
++    private final byte[] mAccessPassword; // null unless supplied
++
++    private TagFilter(int kind, byte[] epc, byte[] tid, byte[] accessPassword) {
++        mKind = kind;
++        mEpc = epc;
++        mTid = tid;
++        mAccessPassword = accessPassword;
++    }
++
++    @NonNull
++    public static TagFilter byEpc(@NonNull byte[] epc) {
++        return new TagFilter(KIND_EPC, requireNonEmpty(epc, "epc"), null, null);
++    }
++
++    @NonNull
++    public static TagFilter byEpc(@NonNull byte[] epc, @NonNull byte[] accessPassword) {
++        return new TagFilter(KIND_EPC, requireNonEmpty(epc, "epc"), null,
++                requirePasswordLength(accessPassword));
++    }
++
++    @NonNull
++    public static TagFilter byTid(@NonNull byte[] tid) {
++        return new TagFilter(KIND_TID, null, requireNonEmpty(tid, "tid"), null);
++    }
++
++    /** Valid only when exactly one tag is in field; the reader (not this filter) enforces that. */
++    @NonNull
++    public static TagFilter any() {
++        return new TagFilter(KIND_ANY, null, null, null);
++    }
++
++    public boolean isByEpc() {
++        return mKind == KIND_EPC;
++    }
++
++    public boolean isByTid() {
++        return mKind == KIND_TID;
++    }
++
++    public boolean isAny() {
++        return mKind == KIND_ANY;
++    }
++
++    /** Non-null only when {@link #isByEpc()}. */
++    @Nullable
++    public byte[] getEpc() {
++        return mEpc;
++    }
++
++    /** Non-null only when {@link #isByTid()}. */
++    @Nullable
++    public byte[] getTid() {
++        return mTid;
++    }
++
++    /** May be null even when {@link #isByEpc()}: the single-arg {@link #byEpc(byte[])} does not
++     * supply one, for tags that do not require one to be written. */
++    @Nullable
++    public byte[] getAccessPassword() {
++        return mAccessPassword;
++    }
++
++    private static byte[] requireNonEmpty(byte[] value, String name) {
++        if (value == null || value.length == 0) {
++            throw new IllegalArgumentException(name + " must not be null or empty");
++        }
++        return value;
++    }
++
++    private static byte[] requirePasswordLength(byte[] password) {
++        if (password == null || password.length != 4) {
++            // EPC C1G2 access/kill passwords are 32 bits (Reserved bank words 2-3 / 0-1).
++            throw new IllegalArgumentException("access password must be exactly 4 bytes");
++        }
++        return password;
++    }
++
++    private TagFilter(Parcel in) {
++        mKind = in.readInt();
++        mEpc = in.createByteArray();
++        mTid = in.createByteArray();
++        mAccessPassword = in.createByteArray();
++    }
++
++    @Override
++    public int describeContents() {
++        return 0;
++    }
++
++    @Override
++    public void writeToParcel(@NonNull Parcel dest, int flags) {
++        dest.writeInt(mKind);
++        dest.writeByteArray(mEpc);
++        dest.writeByteArray(mTid);
++        dest.writeByteArray(mAccessPassword);
++    }
++
++    @NonNull
++    public static final Creator<TagFilter> CREATOR = new Creator<TagFilter>() {
++        @Override
++        public TagFilter createFromParcel(Parcel in) {
++            return new TagFilter(in);
++        }
++
++        @Override
++        public TagFilter[] newArray(int size) {
++            return new TagFilter[size];
++        }
++    };
++}
+diff --git a/core/java/android/hardware/uhf/UhfSession.java b/core/java/android/hardware/uhf/UhfSession.java
+index 9c350143..06f411f0 100644
+--- a/core/java/android/hardware/uhf/UhfSession.java
++++ b/core/java/android/hardware/uhf/UhfSession.java
+@@ -17,6 +17,7 @@
+ package android.hardware.uhf;
+ 
+ import android.annotation.NonNull;
++import android.annotation.Nullable;
+ import android.annotation.SystemApi;
+ import android.os.IBinder;
+ import android.os.RemoteException;
+@@ -279,6 +280,146 @@ public final class UhfSession implements AutoCloseable {
+         }
+     }
+ 
++    // ---------------------------------------------------------------------------------------
++    // §4.10 Tag memory access, §4.11 Tag security (Phase 3)
++    // ---------------------------------------------------------------------------------------
++
++    public static final int BANK_RESERVED = 0;
++    public static final int BANK_EPC = 1;
++    public static final int BANK_TID = 2;
++    public static final int BANK_USER = 3;
++
++    public static final int LOCK_REGION_KILL_PW = 0;
++    public static final int LOCK_REGION_ACCESS_PW = 1;
++    public static final int LOCK_REGION_EPC = 2;
++    public static final int LOCK_REGION_TID = 3;
++    public static final int LOCK_REGION_USER = 4;
++
++    public static final int LOCK_OPEN = 0;
++    public static final int LOCK_LOCKED = 1;
++    public static final int LOCK_PERM_OPEN = 2;
++    public static final int LOCK_PERM_LOCKED = 3;
++
++    @NonNull
++    public byte[] readTagMemory(@NonNull TagFilter filter, int bank, int wordAddress,
++            int wordCount) throws UhfException {
++        try {
++            return mService.readTagMemory(mSessionToken, filter, bank, wordAddress, wordCount);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void writeTagMemory(@NonNull TagFilter filter, int bank, int wordAddress,
++            @NonNull byte[] data) throws UhfException {
++        try {
++            mService.writeTagMemory(mSessionToken, filter, bank, wordAddress, data);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void writeEpc(@NonNull TagFilter filter, @NonNull byte[] newEpc) throws UhfException {
++        try {
++            mService.writeEpc(mSessionToken, filter, newEpc);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Falls back to sequential word writes when the tag does not support block write
++     * (FR-MEM-04) — that fallback happens service-side, transparently to this call. */
++    public void blockWrite(@NonNull TagFilter filter, int bank, int wordAddress,
++            @NonNull byte[] data) throws UhfException {
++        try {
++            mService.blockWrite(mSessionToken, filter, bank, wordAddress, data);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void blockErase(@NonNull TagFilter filter, int bank, int wordAddress, int wordCount)
++            throws UhfException {
++        try {
++            mService.blockErase(mSessionToken, filter, bank, wordAddress, wordCount);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-MEM-07: on by default; disable only for bulk commissioning where the write throughput
++     * cost of a read-back on every word matters more than catching a partial write immediately. */
++    public void setVerifyWrites(boolean verify) throws UhfException {
++        try {
++            mService.setVerifyWrites(mSessionToken, verify);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-SEC-02: {@code killPassword} must not be all zeros — that would kill unconditionally
++     * and is refused rather than honoured. Requires {@code UHF_WRITE}; every call is recorded in
++     * the system event log with the calling package and target EPC (FR-SEC-07). */
++    public void killTag(@NonNull TagFilter filter, @NonNull byte[] killPassword)
++            throws UhfException {
++        try {
++            mService.killTag(mSessionToken, filter, killPassword);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-SEC-04: {@code confirmIrreversible} must be {@code true} to request
++     * {@link #LOCK_PERM_OPEN} or {@link #LOCK_PERM_LOCKED} — both are permanent and cannot be
++     * undone by any later call. */
++    public void lockTag(@NonNull TagFilter filter, int region, int lockState,
++            @Nullable byte[] accessPassword, boolean confirmIrreversible) throws UhfException {
++        try {
++            mService.lockTag(mSessionToken, filter, region, lockState, accessPassword,
++                    confirmIrreversible);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void setAccessPassword(@NonNull TagFilter filter, @NonNull byte[] oldPassword,
++            @NonNull byte[] newPassword) throws UhfException {
++        try {
++            mService.setAccessPassword(mSessionToken, filter, oldPassword, newPassword);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    public void setKillPassword(@NonNull TagFilter filter, @NonNull byte[] accessPassword,
++            @NonNull byte[] newKillPassword) throws UhfException {
++        try {
++            mService.setKillPassword(mSessionToken, filter, accessPassword, newKillPassword);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
+     private static UhfException toUhfException(ServiceSpecificException e) {
+         return new UhfException(e.errorCode, e.getMessage());
+     }
+diff --git a/core/res/AndroidManifest.xml b/core/res/AndroidManifest.xml
+index 7bbe3dfc..d0141e6e 100644
+--- a/core/res/AndroidManifest.xml
++++ b/core/res/AndroidManifest.xml
+@@ -2383,6 +2383,25 @@
+     <permission android:name="android.permission.UHF_READ"
+         android:protectionLevel="normal" />
+ 
++    <!-- Used for permissions that are associated with reading and writing UHF RFID tags. -->
++    <permission-group android:name="android.permission-group.UHF"
++        android:icon="@drawable/perm_group_uhf"
++        android:label="@string/permgrouplab_uhf"
++        android:description="@string/permgroupdesc_uhf"
++        android:priority="120" />
++
++    <!-- UHF-SRS-001 §5.4 (Phase 3). Allows an application to write UHF RFID tag memory: EPC
++         rewrite, block write/erase, kill, lock, and access/kill password management (§4.10-4.11).
++         Separate from UHF_READ because writing a tag is a physical-world, often irreversible act
++         on an object the app may not itself own — unlike inventory, which only reads.
++         <p>Protection level: dangerous
++    -->
++    <permission android:name="android.permission.UHF_WRITE"
++        android:permissionGroup="android.permission-group.UHF"
++        android:label="@string/permlab_uhfWrite"
++        android:description="@string/permdesc_uhfWrite"
++        android:protectionLevel="dangerous" />
++
+     <!-- UHF-SRS-001 §5.4. Allows an application to change the UHF RFID reader's regulatory
+          region, RF power (including above the safe ceiling), antenna configuration, serial
+          link settings, and peripherals. Restricted to the platform and OEM-privileged apps
+diff --git a/core/res/res/drawable/perm_group_uhf.xml b/core/res/res/drawable/perm_group_uhf.xml
+new file mode 100644
+index 00000000..fb7cd54a
+--- /dev/null
++++ b/core/res/res/drawable/perm_group_uhf.xml
+@@ -0,0 +1,29 @@
++<!--
++  ~ Copyright (C) 2026 The Android Open Source Project
++  ~
++  ~ Licensed under the Apache License, Version 2.0 (the "License");
++  ~ you may not use this file except in compliance with the License.
++  ~ You may obtain a copy of the License at
++  ~
++  ~      http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License.
++  -->
++
++<!-- Reuses the same generic device/nearby glyph as perm_group_nearby_devices.xml rather than a
++     bespoke RFID icon — a placeholder appropriate for a narrow, vertical-market permission group,
++     left for a real icon pass rather than blocking on one. -->
++<vector xmlns:android="http://schemas.android.com/apk/res/android"
++        android:width="24dp"
++        android:height="24dp"
++        android:viewportWidth="24"
++        android:viewportHeight="24"
++        android:tint="?attr/colorControlNormal">
++    <path
++        android:fillColor="#000000"
++        android:pathData="M12,16.427L7.574,12 12,7.574 16.426,12zM10.58,2.59l-8,8c-0.78,0.78 -0.78,2.05 0,2.83l8,8c0.78,0.78 2.05,0.78 2.83,0l8,-8c0.78,-0.78 0.78,-2.05 0,-2.83l-8,-8c-0.78,-0.79 -2.04,-0.79 -2.83,0zM13.39,17.81L12,19.2l-1.39,-1.39 -4.42,-4.42L4.8,12l1.39,-1.39 4.42,-4.42L12,4.8l1.39,1.39 4.42,4.42L19.2,12l-1.39,1.39 -4.42,4.42z"/>
++</vector>
+diff --git a/core/res/res/values/strings.xml b/core/res/res/values/strings.xml
+index 9c018c30..7e5bc9cc 100644
+--- a/core/res/res/values/strings.xml
++++ b/core/res/res/values/strings.xml
+@@ -1710,6 +1710,17 @@
+     <string name="permdesc_nfc">Allows the app to communicate
+       with Near Field Communication (NFC) tags, cards, and readers.</string>
+ 
++    <!-- Label for the UHF RFID permission group [CHAR LIMIT=30] -->
++    <string name="permgrouplab_uhf">UHF RFID</string>
++    <!-- Description of the UHF RFID permission group [CHAR LIMIT=NONE] -->
++    <string name="permgroupdesc_uhf">read and write UHF RFID tags</string>
++
++    <!-- Title of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
++    <string name="permlab_uhfWrite">write UHF RFID tags</string>
++    <!-- Description of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
++    <string name="permdesc_uhfWrite">Allows the app to write, rewrite, lock, or permanently
++      disable UHF RFID tags it can read.</string>
++
+     <!-- Title of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+     <string name="permlab_disableKeyguard">disable your screen lock</string>
+     <!-- Description of an application permission, listed so the user can choose whether they want to allow the application to do this. -->
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+index 0906b91e..69199d45 100644
+--- a/services/core/java/com/android/server/uhf/UhfService.java
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -24,6 +24,7 @@ import android.hardware.uhf.IUhfTagCallback;
+ import android.hardware.uhf.InventoryParams;
+ import android.hardware.uhf.StreamParams;
+ import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.TagFilter;
+ import android.hardware.uhf.UhfDeviceInfo;
+ import android.hardware.uhf.UhfManager;
+ import android.hardware.uhf.UhfReaderInfo;
+@@ -138,8 +139,34 @@ public final class UhfService extends SystemService {
+         super(context);
+         UhfTransport transport = new UhfHalTransport();
+         SettingsRegionStore regionStore = new SettingsRegionStore(context);
+-        mArbiter = new UhfSessionArbiter(transport, regionStore, (client, bandCode) ->
+-                Slog.i(TAG, "region changed to band 0x" + Integer.toHexString(bandCode))); // FR-FRQ-04
++        mArbiter = new UhfSessionArbiter(transport, regionStore, new UhfSessionArbiter.EventLog() {
++            @Override
++            public void onRegionChanged(Object clientToken, int newBandCode) {
++                // FR-FRQ-04: region is a regulatory-visible change.
++                Slog.i(TAG, "region changed to band 0x" + Integer.toHexString(newBandCode)
++                        + " by uid " + Binder.getCallingUid());
++            }
++
++            @Override
++            public void onIrreversibleOperation(Object clientToken, String operation,
++                    UhfSessionArbiter.TagFilterSpec filter) {
++                // FR-SEC-07: calling package + target EPC/TID, not a free-text description.
++                String target = filter.kind == UhfSessionArbiter.TagFilterSpec.KIND_EPC
++                        ? "epc=" + bytesToHex(filter.epc)
++                        : filter.kind == UhfSessionArbiter.TagFilterSpec.KIND_TID
++                                ? "tid=" + bytesToHex(filter.tid) : "any";
++                Slog.i(TAG, "irreversible op '" + operation + "' on " + target + " by uid "
++                        + Binder.getCallingUid());
++            }
++        });
++    }
++
++    private static String bytesToHex(byte[] b) {
++        StringBuilder sb = new StringBuilder(b.length * 2);
++        for (byte x : b) {
++            sb.append(String.format("%02X", x));
++        }
++        return sb.toString();
+     }
+ 
+     @Override
+@@ -398,6 +425,152 @@ public final class UhfService extends SystemService {
+             state.stats.reset();
+         }
+ 
++        // ---- §4.10 Tag memory access, §4.11 Tag security (Phase 3) ----
++
++        @Override
++        public byte[] readTagMemory(IBinder sessionToken, TagFilter filter, int bank,
++                int wordAddress, int wordCount) {
++            enforceRead(); // reading is not writing
++            requireOwnedSession(sessionToken);
++            try {
++                return mArbiter.readTagMemory(sessionToken, toSpec(filter), bank, wordAddress,
++                        wordCount);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void writeTagMemory(IBinder sessionToken, TagFilter filter, int bank,
++                int wordAddress, byte[] data) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.writeTagMemory(sessionToken, toSpec(filter), bank, wordAddress, data);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void writeEpc(IBinder sessionToken, TagFilter filter, byte[] newEpc) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.writeEpc(sessionToken, toSpec(filter), newEpc);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void blockWrite(IBinder sessionToken, TagFilter filter, int bank, int wordAddress,
++                byte[] data) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.blockWrite(sessionToken, toSpec(filter), bank, wordAddress, data);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void blockErase(IBinder sessionToken, TagFilter filter, int bank, int wordAddress,
++                int wordCount) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.blockErase(sessionToken, toSpec(filter), bank, wordAddress, wordCount);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void setVerifyWrites(IBinder sessionToken, boolean verify) {
++            requireOwnedSession(sessionToken);
++            mArbiter.setVerifyWrites(verify);
++        }
++
++        @Override
++        public void killTag(IBinder sessionToken, TagFilter filter, byte[] killPassword) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.killTag(sessionToken, toSpec(filter), killPassword);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void lockTag(IBinder sessionToken, TagFilter filter, int region, int lockState,
++                byte[] accessPassword, boolean confirmIrreversible) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.lockTag(sessionToken, toSpec(filter), region, lockState, accessPassword,
++                        confirmIrreversible);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void setAccessPassword(IBinder sessionToken, TagFilter filter, byte[] oldPassword,
++                byte[] newPassword) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.setAccessPassword(sessionToken, toSpec(filter), oldPassword, newPassword);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        @Override
++        public void setKillPassword(IBinder sessionToken, TagFilter filter, byte[] accessPassword,
++                byte[] newKillPassword) {
++            enforceWrite();
++            requireOwnedSession(sessionToken);
++            try {
++                mArbiter.setKillPassword(sessionToken, toSpec(filter), accessPassword,
++                        newKillPassword);
++            } catch (IllegalArgumentException e) {
++                throw new ServiceSpecificException(UHF_ERROR_INVALID_PARAMETER, e.getMessage());
++            } catch (UhfTransportException e) {
++                throw toServiceSpecificException(e);
++            }
++        }
++
++        /** Converts the framework Parcelable to the arbiter's framework-independent mirror — see
++         * {@code UhfSessionArbiter.TagFilterSpec}'s own doc on why the arbiter doesn't import
++         * {@link TagFilter} directly. */
++        private UhfSessionArbiter.TagFilterSpec toSpec(TagFilter filter) {
++            int kind = filter.isByEpc() ? UhfSessionArbiter.TagFilterSpec.KIND_EPC
++                    : filter.isByTid() ? UhfSessionArbiter.TagFilterSpec.KIND_TID
++                            : UhfSessionArbiter.TagFilterSpec.KIND_ANY;
++            return new UhfSessionArbiter.TagFilterSpec(
++                    kind, filter.getEpc(), filter.getTid(), filter.getAccessPassword());
++        }
++
+         // -----------------------------------------------------------------------------------
+ 
+         private void enforceRead() {
+@@ -410,6 +583,11 @@ public final class UhfService extends SystemService {
+                     Manifest.permission.UHF_CONFIGURE, "requires android.permission.UHF_CONFIGURE");
+         }
+ 
++        private void enforceWrite() {
++            getContext().enforceCallingOrSelfPermission(
++                    Manifest.permission.UHF_WRITE, "requires android.permission.UHF_WRITE");
++        }
++
+         /**
+          * FR-LC-03's exclusivity is enforced by {@link UhfSessionArbiter} itself (only the caller
+          * holding the token may act on it); this additionally enforces NFR-S-03 ("verify the
+diff --git a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+index df053330..76890296 100644
+--- a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
++++ b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+@@ -57,6 +57,15 @@ public final class UhfSessionArbiter {
+     private static final int CMD_BUFFERED_START = 0x18; // FR-BUF-01, status Confirm pending OI-01
+     private static final int CMD_BUFFERED_STOP = 0x1A;  // FR-BUF-04, status Confirm pending OI-01
+ 
++    // §4.10/§4.11 (Phase 3). All Confirm status pending OI-01 — see buildTagOpPayload's doc.
++    private static final int CMD_READ_MEMORY = 0x02;
++    private static final int CMD_WRITE_MEMORY = 0x03;
++    private static final int CMD_WRITE_EPC = 0x04;
++    private static final int CMD_BLOCK_WRITE = 0x10;
++    private static final int CMD_BLOCK_ERASE = 0x07;
++    private static final int CMD_KILL = 0x05;
++    private static final int CMD_LOCK = 0x06;
++
+     private static final int DEFAULT_TIMEOUT_MS = 500;
+ 
+     /** FR-PWR-03: default safe ceiling; exceeding it requires the caller's explicit override. */
+@@ -77,8 +86,39 @@ public final class UhfSessionArbiter {
+     /** Structured audit sink for the log-worthy events (FR-FRQ-04, FR-SEC-07). */
+     public interface EventLog {
+         void onRegionChanged(Object clientToken, int newBandCode);
++
++        /** FR-SEC-07: every irreversible tag operation (kill, permanent lock, permalock) —
++         * {@code operation} is a short stable tag like {@code "kill"} or {@code "lock:perm"},
++         * not a free-text description. */
++        void onIrreversibleOperation(Object clientToken, String operation, TagFilterSpec filter);
++    }
++
++    /**
++     * Framework-independent mirror of {@code android.hardware.uhf.TagFilter} — see this class's
++     * own doc on why {@code UhfSessionArbiter} does not import framework Parcelable types
++     * directly. {@code UhfService} converts one to the other at the Binder boundary.
++     */
++    public static final class TagFilterSpec {
++        public static final int KIND_EPC = 0;
++        public static final int KIND_TID = 1;
++        public static final int KIND_ANY = 2;
++
++        public final int kind;
++        public final byte[] epc;   // non-null only when kind == KIND_EPC
++        public final byte[] tid;   // non-null only when kind == KIND_TID
++        public final byte[] accessPassword; // nullable regardless of kind
++
++        public TagFilterSpec(int kind, byte[] epc, byte[] tid, byte[] accessPassword) {
++            this.kind = kind;
++            this.epc = epc;
++            this.tid = tid;
++            this.accessPassword = accessPassword;
++        }
+     }
+ 
++    public static final int LOCK_PERM_OPEN = 2;   // mirrors android.hardware.uhf.UhfSession's
++    public static final int LOCK_PERM_LOCKED = 3; // LOCK_* constants — see UhfService's mapping.
++
+     private Object holder; // null = no session held
+     private ReaderMode mode = ReaderMode.IDLE;
+     private int antennaMask;
+@@ -87,6 +127,14 @@ public final class UhfSessionArbiter {
+     private int safePowerCeiling = DEFAULT_SAFE_POWER_CEILING;
+     private int maxRfPowerFromReader = 30; // FR-PWR-02 ceiling; refreshed by identify() in practice
+     private StreamRequest lastStreamRequest; // for FR-STR-13's auto-restart
++    private boolean verifyWrites = true; // FR-MEM-07: on by default
++
++    /** FR-MEM-06: a generic, tag-capacity-independent upper bound. Real per-bank capacity is
++     * tag-model-specific and not knowable without querying the tag itself, which this reader
++     * family's identify command (0x21) does not report — only that a requested range is at least
++     * plausible can be checked locally; the reader is still the authority on whether a specific
++     * tag actually has that much memory. */
++    private static final int MAX_REASONABLE_WORD_COUNT = 128;
+ 
+     /** Minimal description of an active stream, enough to restart it after a forced stop. */
+     public static final class StreamRequest {
+@@ -427,6 +475,240 @@ public final class UhfSessionArbiter {
+         }
+     }
+ 
++    // ---------------------------------------------------------------------------------------
++    // §4.10 Tag memory access (Phase 3)
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized byte[] readTagMemory(Object clientToken, TagFilterSpec filter, int bank,
++            int wordAddress, int wordCount) throws UhfTransportException {
++        requireHolder(clientToken);
++        requireValidWordRange(wordAddress, wordCount); // FR-MEM-06
++        return runExclusiveOfActiveMode(() -> {
++            byte[] payload = buildTagOpPayload(filter, bank, wordAddress, wordCount, null);
++            byte[] reply = transport.transact(CMD_READ_MEMORY, payload, DEFAULT_TIMEOUT_MS);
++            return dataAfterStatus(reply);
++        });
++    }
++
++    public synchronized void writeTagMemory(Object clientToken, TagFilterSpec filter, int bank,
++            int wordAddress, byte[] data) throws UhfTransportException {
++        requireHolder(clientToken);
++        int wordCount = wordCountFor(data);
++        requireValidWordRange(wordAddress, wordCount); // FR-MEM-06
++        runExclusiveOfActiveMode(() -> {
++            byte[] payload = buildTagOpPayload(filter, bank, wordAddress, wordCount, data);
++            transport.transact(CMD_WRITE_MEMORY, payload, DEFAULT_TIMEOUT_MS);
++            verifyWriteIfEnabled(filter, bank, wordAddress, data);
++            return null;
++        });
++    }
++
++    public synchronized void writeEpc(Object clientToken, TagFilterSpec filter, byte[] newEpc)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        runExclusiveOfActiveMode(() -> {
++            byte[] payload = buildTagOpPayload(filter, BANK_EPC, 0, wordCountFor(newEpc), newEpc);
++            transport.transact(CMD_WRITE_EPC, payload, DEFAULT_TIMEOUT_MS);
++            verifyWriteIfEnabled(filter, BANK_EPC, EPC_START_WORD_AFTER_CRC_AND_PC, newEpc);
++            return null;
++        });
++    }
++
++    public synchronized void blockWrite(Object clientToken, TagFilterSpec filter, int bank,
++            int wordAddress, byte[] data) throws UhfTransportException {
++        requireHolder(clientToken);
++        int wordCount = wordCountFor(data);
++        requireValidWordRange(wordAddress, wordCount); // FR-MEM-06
++        runExclusiveOfActiveMode(() -> {
++            byte[] payload = buildTagOpPayload(filter, bank, wordAddress, wordCount, data);
++            transport.transact(CMD_BLOCK_WRITE, payload, DEFAULT_TIMEOUT_MS);
++            verifyWriteIfEnabled(filter, bank, wordAddress, data);
++            return null;
++        });
++    }
++
++    public synchronized void blockErase(Object clientToken, TagFilterSpec filter, int bank,
++            int wordAddress, int wordCount) throws UhfTransportException {
++        requireHolder(clientToken);
++        requireValidWordRange(wordAddress, wordCount); // FR-MEM-06
++        runExclusiveOfActiveMode(() -> {
++            byte[] payload = buildTagOpPayload(filter, bank, wordAddress, wordCount, null);
++            transport.transact(CMD_BLOCK_ERASE, payload, DEFAULT_TIMEOUT_MS);
++            return null;
++        });
++    }
++
++    public synchronized void setVerifyWrites(boolean verify) {
++        this.verifyWrites = verify;
++    }
++
++    public synchronized boolean isVerifyWritesEnabled() {
++        return verifyWrites;
++    }
++
++    /** EPC C1G2 memory is word-addressed; a byte array whose length isn't even cannot represent a
++     * whole number of words. Computing {@code data.length / 2} without this check would silently
++     * truncate an odd trailing byte instead of rejecting the call. */
++    private static int wordCountFor(byte[] data) {
++        if (data.length % 2 != 0) {
++            throw new IllegalArgumentException(
++                    "data length " + data.length + " is not a whole number of words (odd)");
++        }
++        return data.length / 2;
++    }
++
++    private void requireValidWordRange(int wordAddress, int wordCount) {
++        if (wordAddress < 0 || wordCount <= 0
++                || wordAddress + wordCount > MAX_REASONABLE_WORD_COUNT) {
++            throw new IllegalArgumentException("word range [" + wordAddress + ", "
++                    + (wordAddress + wordCount) + ") is invalid or exceeds the generic bound of "
++                    + MAX_REASONABLE_WORD_COUNT + " words (FR-MEM-06)");
++        }
++    }
++
++    /** FR-MEM-07: read the just-written range back and compare. Throws
++     * {@link UhfTransportException} with {@code ERROR_PROTOCOL} on a mismatch — this is the
++     * "verification catches an induced failure" behaviour TST-I-08 asks for; it does not yet
++     * report how many leading words matched before the first mismatch (FR-MEM-08 is partially
++     * implemented: the failure is caught, the partial-commit count is not surfaced). */
++    private void verifyWriteIfEnabled(TagFilterSpec filter, int bank, int wordAddress, byte[] data)
++            throws UhfTransportException {
++        if (!verifyWrites) {
++            return;
++        }
++        byte[] payload = buildTagOpPayload(filter, bank, wordAddress, data.length / 2, null);
++        byte[] reply = transport.transact(CMD_READ_MEMORY, payload, DEFAULT_TIMEOUT_MS);
++        byte[] readBack = dataAfterStatus(reply);
++        if (!java.util.Arrays.equals(readBack, data)) {
++            throw new UhfTransportException(UhfProtocol.ERROR_PROTOCOL,
++                    "write verification failed: read-back does not match what was written");
++        }
++    }
++
++    private static byte[] dataAfterStatus(byte[] reply) {
++        if (reply.length == 0) {
++            return reply;
++        }
++        return java.util.Arrays.copyOfRange(reply, 1, reply.length);
++    }
++
++    // §4.10's bank constants, duplicated here rather than referencing
++    // android.hardware.uhf.UhfSession.BANK_* — this class does not import framework types.
++    private static final int BANK_EPC = 1;
++    // FR-MEM-03: EPC bank words 0-1 are CRC-16 and Protocol Control; the EPC itself starts at
++    // word 2. Confirm status pending OI-01, same as the rest of this section's payload layout.
++    private static final int EPC_START_WORD_AFTER_CRC_AND_PC = 2;
++
++    /**
++     * Builds the payload for every §4.10/§4.11 tag operation. UNVERIFIED (Confirm status,
++     * pending OI-01 exactly like R1 has not confirmed these commands' codes): this reader
++     * family's manual was not available when this was written, so this is a plausible, simple
++     * layout in the same spirit as {@link #inventory}'s optional-triple encoding — password
++     * first (zero-filled if the filter carries none), then the EPC/TID select value if the
++     * filter needs one, then bank/address/count, then any data to write. If it does not match
++     * R1, only this one method needs to change; every caller and every test that isn't asserting
++     * this exact byte layout keeps working.
++     */
++    private static byte[] buildTagOpPayload(TagFilterSpec filter, int bank, int wordAddress,
++            int wordCount, byte[] data) {
++        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
++        byte[] password = filter.accessPassword != null ? filter.accessPassword
++                : new byte[] {0, 0, 0, 0};
++        out.write(password, 0, password.length);
++        if (filter.kind == TagFilterSpec.KIND_EPC) {
++            out.write(filter.epc.length & 0xFF);
++            out.write(filter.epc, 0, filter.epc.length);
++        } else if (filter.kind == TagFilterSpec.KIND_TID) {
++            out.write(filter.tid.length & 0xFF);
++            out.write(filter.tid, 0, filter.tid.length);
++        } else {
++            out.write(0); // KIND_ANY: zero-length select value, reader must have exactly one tag
++        }
++        out.write(bank & 0xFF);
++        out.write(wordAddress & 0xFF);
++        out.write(wordCount & 0xFF);
++        if (data != null) {
++            out.write(data, 0, data.length);
++        }
++        return out.toByteArray();
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // §4.11 Tag security (Phase 3)
++    // ---------------------------------------------------------------------------------------
++
++    public synchronized void killTag(Object clientToken, TagFilterSpec filter, byte[] killPassword)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        if (killPassword == null || killPassword.length != 4 || isAllZero(killPassword)) {
++            // FR-SEC-02: an all-zero password would kill unconditionally; refuse rather than
++            // honour it. This is the one check in this whole section that does not depend on the
++            // Confirm-status wire layout above being right — it is pure input validation.
++            throw new IllegalArgumentException(
++                    "kill password must be exactly 4 bytes and non-zero (FR-SEC-02)");
++        }
++        runExclusiveOfActiveMode(() -> {
++            byte[] payload = buildTagOpPayload(
++                    new TagFilterSpec(filter.kind, filter.epc, filter.tid, killPassword),
++                    0, 0, 0, null);
++            transport.transact(CMD_KILL, payload, DEFAULT_TIMEOUT_MS);
++            eventLog.onIrreversibleOperation(clientToken, "kill", filter); // FR-SEC-07
++            return null;
++        });
++    }
++
++    public synchronized void lockTag(Object clientToken, TagFilterSpec filter, int region,
++            int lockState, byte[] accessPassword, boolean confirmIrreversible)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        boolean isPermanent = (lockState == LOCK_PERM_OPEN || lockState == LOCK_PERM_LOCKED);
++        if (isPermanent && !confirmIrreversible) {
++            // FR-SEC-04: also pure input validation, independent of the wire layout below.
++            throw new IllegalArgumentException(
++                    "permanent lock state " + lockState + " requires confirmIrreversible=true "
++                            + "(FR-SEC-04)");
++        }
++        runExclusiveOfActiveMode(() -> {
++            TagFilterSpec effective = accessPassword != null
++                    ? new TagFilterSpec(filter.kind, filter.epc, filter.tid, accessPassword)
++                    : filter;
++            byte[] payload = buildTagOpPayload(effective, region, lockState, 0, null);
++            transport.transact(CMD_LOCK, payload, DEFAULT_TIMEOUT_MS);
++            if (isPermanent) {
++                eventLog.onIrreversibleOperation(clientToken, "lock:" + lockState, filter); // FR-SEC-07
++            }
++            return null;
++        });
++    }
++
++    public synchronized void setAccessPassword(Object clientToken, TagFilterSpec filter,
++            byte[] oldPassword, byte[] newPassword) throws UhfTransportException {
++        requireHolder(clientToken);
++        writeTagMemory(clientToken, new TagFilterSpec(filter.kind, filter.epc, filter.tid,
++                oldPassword), 0 /* BANK_RESERVED */, ACCESS_PASSWORD_START_WORD, newPassword);
++    }
++
++    public synchronized void setKillPassword(Object clientToken, TagFilterSpec filter,
++            byte[] accessPassword, byte[] newKillPassword) throws UhfTransportException {
++        requireHolder(clientToken);
++        writeTagMemory(clientToken, new TagFilterSpec(filter.kind, filter.epc, filter.tid,
++                accessPassword), 0 /* BANK_RESERVED */, KILL_PASSWORD_START_WORD, newKillPassword);
++    }
++
++    // FR-SEC-05: "the reserved bank" per §4.10's table — kill password at words 0-1, access
++    // password at words 2-3. Confirm status, same caveat as buildTagOpPayload's.
++    private static final int KILL_PASSWORD_START_WORD = 0;
++    private static final int ACCESS_PASSWORD_START_WORD = 2;
++
++    private static boolean isAllZero(byte[] b) {
++        for (byte x : b) {
++            if (x != 0) {
++                return false;
++            }
++        }
++        return true;
++    }
++
+     /**
+      * FR-STR-13: runs {@code op} with any active stream stopped first, and restarts it
+      * immediately afterward with its original parameters if — and only if — the caller had not
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+index d7d9f6b4..bab20fc8 100644
+--- a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+@@ -557,6 +557,262 @@ public class UhfSessionArbiterTest {
+                 transport.calls.contains("startStream"));
+     }
+ 
++    // ---------------------------------------------------------------------------------------
++    // §4.10 Tag memory access (Phase 3)
++    // ---------------------------------------------------------------------------------------
++
++    private static UhfSessionArbiter.TagFilterSpec epcFilter(byte[] epc) {
++        return new UhfSessionArbiter.TagFilterSpec(
++                UhfSessionArbiter.TagFilterSpec.KIND_EPC, epc, null, null);
++    }
++
++    @Test
++    public void readTagMemory_rejectsNegativeWordAddress() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.readTagMemory(client, epcFilter(new byte[] {1, 2}), 3, -1, 2);
++            fail("expected rejection of a negative word address");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void readTagMemory_rejectsZeroOrNegativeWordCount() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.readTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, 0);
++            fail("expected rejection of a zero word count");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void readTagMemory_rejectsRangeBeyondTheGenericBound() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.readTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, 1000);
++            fail("expected rejection of an unreasonably large word count (FR-MEM-06)");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void readTagMemory_returnsDataAfterTheStatusByte() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        byte[] expected = {0x11, 0x22, 0x33, 0x44};
++        byte[] reply = new byte[1 + expected.length];
++        reply[0] = 0x01; // arbitrary success status
++        System.arraycopy(expected, 0, reply, 1, expected.length);
++        transport.cannedReplies.put(0x02, reply);
++
++        byte[] got = arbiter.readTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, 2);
++
++        assertArrayEquals(expected, got);
++    }
++
++    @Test
++    public void writeTagMemory_verifiesByDefault_andSucceedsWhenReadBackMatches() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        byte[] data = {0x55, 0x66};
++        byte[] readBackReply = {0x01, 0x55, 0x66}; // status + matching data
++        transport.cannedReplies.put(0x02, readBackReply);
++
++        arbiter.writeTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, data);
++
++        assertTrue("verification must read back after writing",
++                transport.calls.contains("transact(0x3)")); // write
++        assertTrue(transport.calls.contains("transact(0x2)")); // verify read
++    }
++
++    @Test
++    public void writeTagMemory_verificationFailureThrowsProtocolError() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        byte[] data = {0x55, 0x66};
++        byte[] readBackReply = {0x01, (byte) 0xFF, (byte) 0xFF}; // status + WRONG data
++        transport.cannedReplies.put(0x02, readBackReply);
++
++        try {
++            arbiter.writeTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, data);
++            fail("expected the read-back mismatch to be caught (FR-MEM-07 / TST-I-08)");
++        } catch (UhfTransportException e) {
++            assertEquals(UhfProtocol.ERROR_PROTOCOL, e.getErrorCode());
++        }
++    }
++
++    @Test
++    public void setVerifyWrites_falseSkipsTheReadBack() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setVerifyWrites(false);
++        assertFalse(arbiter.isVerifyWritesEnabled());
++
++        // Even a "wrong" read-back reply must not matter, because verification is now off.
++        transport.cannedReplies.put(0x02, new byte[] {0x01, (byte) 0xFF});
++        arbiter.writeTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, new byte[] {0x55, 0x66});
++
++        assertFalse("no verification read should have been issued",
++                transport.calls.contains("transact(0x2)"));
++    }
++
++    @Test
++    public void writeTagMemory_whileStreaming_stopsAndRestartsLikeOtherNonStreamCalls()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
++        arbiter.setVerifyWrites(false); // isolate the stop/apply/restart sequence
++        transport.reset();
++
++        arbiter.writeTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0, new byte[] {0x01, 0x02});
++
++        assertEquals(List.of("stopStream", "transact(0x3)", "startStream"), transport.calls);
++        assertTrue(arbiter.isStreaming(client));
++    }
++
++    @Test
++    public void writeTagMemory_rejectsAnOddLengthDataArrayInsteadOfSilentlyTruncatingIt()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            // 3 bytes is not a whole number of 2-byte words; data.length/2 would silently drop
++            // the trailing byte instead of rejecting the call if this weren't checked explicitly.
++            arbiter.writeTagMemory(client, epcFilter(new byte[] {1, 2}), 3, 0,
++                    new byte[] {0x01, 0x02, 0x03});
++            fail("expected rejection of an odd-length data array");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void blockErase_rejectsInvalidWordRangeTheSameWayReadDoes() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.blockErase(client, epcFilter(new byte[] {1, 2}), 3, -5, 2);
++            fail("expected rejection of a negative word address");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // §4.11 Tag security (Phase 3)
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void killTag_rejectsAllZeroPassword() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.killTag(client, epcFilter(new byte[] {1, 2}), new byte[] {0, 0, 0, 0});
++            fail("expected rejection of an all-zero kill password (FR-SEC-02)");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++        assertTrue("must be rejected before reaching the reader", transport.calls.isEmpty());
++    }
++
++    @Test
++    public void killTag_rejectsWrongLengthPassword() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.killTag(client, epcFilter(new byte[] {1, 2}), new byte[] {1, 2, 3});
++            fail("expected rejection of a non-4-byte password");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++    }
++
++    @Test
++    public void killTag_withNonZeroPasswordSucceedsAndIsAudited() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++
++        arbiter.killTag(client, epcFilter(new byte[] {1, 2}), new byte[] {0, 0, 0, 1});
++
++        assertTrue(transport.calls.contains("transact(0x5)"));
++        assertEquals("FR-SEC-07: every irreversible op is audited",
++                List.of("kill"), eventLog.irreversibleOps);
++    }
++
++    @Test
++    public void lockTag_permanentStateWithoutConfirmIsRejected() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        try {
++            arbiter.lockTag(client, epcFilter(new byte[] {1, 2}), 0,
++                    UhfSessionArbiter.LOCK_PERM_LOCKED, null, /* confirmIrreversible= */ false);
++            fail("expected rejection of a permanent lock without explicit confirmation (FR-SEC-04)");
++        } catch (IllegalArgumentException expected) {
++            // pass
++        }
++        assertTrue(transport.calls.isEmpty());
++        assertTrue("must not be audited if it was never sent", eventLog.irreversibleOps.isEmpty());
++    }
++
++    @Test
++    public void lockTag_permanentStateWithConfirmSucceedsAndIsAudited() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++
++        arbiter.lockTag(client, epcFilter(new byte[] {1, 2}), 0,
++                UhfSessionArbiter.LOCK_PERM_LOCKED, null, /* confirmIrreversible= */ true);
++
++        assertTrue(transport.calls.contains("transact(0x6)"));
++        assertEquals(List.of("lock:3"), eventLog.irreversibleOps); // LOCK_PERM_LOCKED == 3
++    }
++
++    @Test
++    public void lockTag_nonPermanentStateNeedsNoConfirmationAndIsNotAudited() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++
++        arbiter.lockTag(client, epcFilter(new byte[] {1, 2}), 0,
++                1 /* LOCK_LOCKED, temporary */, null, /* confirmIrreversible= */ false);
++
++        assertTrue(transport.calls.contains("transact(0x6)"));
++        assertTrue("temporary lock states are not irreversible operations",
++                eventLog.irreversibleOps.isEmpty());
++    }
++
++    @Test
++    public void setAccessPassword_delegatesToWriteTagMemoryAtTheReservedBankOffset()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setVerifyWrites(false);
++
++        arbiter.setAccessPassword(client, epcFilter(new byte[] {1, 2}),
++                new byte[] {0, 0, 0, 0}, new byte[] {9, 9, 9, 9});
++
++        assertTrue(transport.calls.contains("transact(0x3)")); // CMD_WRITE_MEMORY
++    }
++
++    @Test
++    public void setKillPassword_delegatesToWriteTagMemoryAtTheReservedBankOffset()
++            throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.setVerifyWrites(false);
++
++        arbiter.setKillPassword(client, epcFilter(new byte[] {1, 2}),
++                new byte[] {0, 0, 0, 0}, new byte[] {8, 8, 8, 8});
++
++        assertTrue(transport.calls.contains("transact(0x3)")); // CMD_WRITE_MEMORY
++    }
++
+     // ---------------------------------------------------------------------------------------
+     // Test fixtures
+     // ---------------------------------------------------------------------------------------
+@@ -657,9 +913,15 @@ public class UhfSessionArbiterTest {
+ 
+     private static final class FakeEventLog implements UhfSessionArbiter.EventLog {
+         final List<Integer> regionChanges = new ArrayList<>();
++        final List<String> irreversibleOps = new ArrayList<>();
+ 
+         @Override public void onRegionChanged(Object clientToken, int newBandCode) {
+             regionChanges.add(newBandCode);
+         }
++
++        @Override public void onIrreversibleOperation(Object clientToken, String operation,
++                UhfSessionArbiter.TagFilterSpec filter) {
++            irreversibleOps.add(operation);
++        }
+     }
+ }
+-- 
+2.34.1
+
