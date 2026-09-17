@@ -1,0 +1,1634 @@
+From 0c730ca0739f673ac01126eac6013d93db2cfd49 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 09:02:17 +0200
+Subject: [PATCH] =?UTF-8?q?uhf-sdk:=20add=20the=20Phase=204=20developer=20?=
+ =?UTF-8?q?SDK=20(SRS=20=C2=A77),=20compiled=20and=20tested=20for=20real?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Implements UHF-SRS-001 §7 SDK-01/03/04/06/07/08/09: a thin Kotlin/Java
+facade over android.hardware.uhf.UhfManager, distributed as
+com.rockchip.uhf:uhf-sdk. Unlike most of this patch series, this layer
+was not just written and cross-checked by hand — a real toolchain turned
+up in this environment (prebuilts/build-tools aidl,
+prebuilts/sdk/34/system/android.jar, external/kotlinc, JUnit) and was
+used to actually compile and, where possible, run every file added here.
+
+- UhfSdkSession/RealUhfSdkSession/UhfSdk (SDK-01/03/04): the session
+  interface mirrors android.hardware.uhf.UhfSession method-for-method;
+  RealUhfSdkSession is pure 1:1 delegation, verified by compiling it
+  directly against the real compiled UhfSession class rather than a
+  hand-written stub standing in for it.
+
+- FakeUhfSdkSession (SDK-09): an in-memory reader enforcing the same
+  contracts the platform arbiter does (FR-SEC-02 kill-password check,
+  FR-SEC-04 permanent-lock confirmation, FR-MEM-06 word-range validation)
+  so code passing against the fake has already met what a real reader
+  would also demand. FakeUhfSdkSessionTest's 12 tests were compiled and
+  actually executed against JUnit 4 (not just compiled), including
+  exercising real background streaming via a genuine
+  ScheduledExecutorService. All pass.
+
+- UhfSdkKt.kt (SDK-08): coroutine/Flow adapters, compiled with a real
+  Kotlin 1.8.10 compiler against a real kotlinx-coroutines-core jar.
+  inventorySuspend() is deliberately not named inventory() — verified
+  empirically (not assumed) that a same-named suspend extension compiles
+  but is silently shadowed by UhfSdkSession's existing blocking member
+  and becomes unreachable through ordinary call syntax.
+
+- sdk/sample/ (SDK-05): a reference app demonstrating every API group in
+  the order SRS §7's own usage example presents them; also compiled for
+  real against the same classpath.
+
+A real, incidental bug in the platform layer (frameworks/base, not this
+commit) was caught by this verification effort and fixed separately:
+IUhfService.aidl needs a companion <ClassName>.aidl declaration for every
+custom Parcelable it references. Missing since Phase 1; found by actually
+running the aidl compiler for the first time in this series.
+
+STATUS: no Gradle/AGP build was performed (unavailable in this
+environment) — packaging into an AAR, resource/manifest merging, and any
+device or emulator run remain untested. SDK-02's stub jar (generated from
+the platform API signature files via metalava) does not exist yet; this
+verification used the real compiled platform classes directly instead,
+which proves the SDK source is correct against the real API shape without
+that specific packaged artifact. SDK-10 (Maven publishing) not attempted.
+See uhf-sdk/README.md for the full verified-vs-not breakdown.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ sample/build.gradle.kts                       |  32 ++
+ sample/src/main/AndroidManifest.xml           |  24 +
+ .../rockchip/uhf/sdk/sample/MainActivity.kt   | 132 ++++++
+ settings.gradle.kts                           |   3 +
+ uhf-sdk/README.md                             | 102 ++++
+ uhf-sdk/build.gradle.kts                      |  50 ++
+ uhf-sdk/consumer-rules.pro                    |   8 +
+ .../rockchip/uhf/sdk/FakeUhfSdkSession.java   | 435 ++++++++++++++++++
+ .../rockchip/uhf/sdk/RealUhfSdkSession.java   | 178 +++++++
+ .../java/com/rockchip/uhf/sdk/UhfSdk.java     |  72 +++
+ .../com/rockchip/uhf/sdk/UhfSdkSession.java   | 124 +++++
+ .../kotlin/com/rockchip/uhf/sdk/UhfSdkKt.kt   |  77 ++++
+ .../uhf/sdk/FakeUhfSdkSessionTest.java        | 228 +++++++++
+ 13 files changed, 1465 insertions(+)
+ create mode 100644 sample/build.gradle.kts
+ create mode 100644 sample/src/main/AndroidManifest.xml
+ create mode 100644 sample/src/main/java/com/rockchip/uhf/sdk/sample/MainActivity.kt
+ create mode 100644 settings.gradle.kts
+ create mode 100644 uhf-sdk/README.md
+ create mode 100644 uhf-sdk/build.gradle.kts
+ create mode 100644 uhf-sdk/consumer-rules.pro
+ create mode 100644 uhf-sdk/src/main/java/com/rockchip/uhf/sdk/FakeUhfSdkSession.java
+ create mode 100644 uhf-sdk/src/main/java/com/rockchip/uhf/sdk/RealUhfSdkSession.java
+ create mode 100644 uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdk.java
+ create mode 100644 uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdkSession.java
+ create mode 100644 uhf-sdk/src/main/kotlin/com/rockchip/uhf/sdk/UhfSdkKt.kt
+ create mode 100644 uhf-sdk/src/test/java/com/rockchip/uhf/sdk/FakeUhfSdkSessionTest.java
+
+diff --git a/sample/build.gradle.kts b/sample/build.gradle.kts
+new file mode 100644
+index 0000000..4fd181a
+--- /dev/null
++++ b/sample/build.gradle.kts
+@@ -0,0 +1,32 @@
++// SDK-05 reference app. Structural, unbuilt in this environment — see ../uhf-sdk/README.md.
++plugins {
++    id("com.android.application")
++    id("org.jetbrains.kotlin.android")
++}
++
++android {
++    namespace = "com.rockchip.uhf.sdk.sample"
++    compileSdk = 34
++
++    defaultConfig {
++        applicationId = "com.rockchip.uhf.sdk.sample"
++        minSdk = 26
++        targetSdk = 34
++        versionCode = 1
++        versionName = "1.0"
++    }
++
++    compileOptions {
++        sourceCompatibility = JavaVersion.VERSION_17
++        targetCompatibility = JavaVersion.VERSION_17
++    }
++
++    kotlinOptions {
++        jvmTarget = "17"
++    }
++}
++
++dependencies {
++    implementation(project(":uhf-sdk"))
++    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
++}
+diff --git a/sample/src/main/AndroidManifest.xml b/sample/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000..bc23273
+--- /dev/null
++++ b/sample/src/main/AndroidManifest.xml
+@@ -0,0 +1,24 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- SDK-05 reference app manifest. uses-feature required="false": the sample must still install
++     and demonstrate the UhfSdk.openFake() fallback on a device/emulator with no reader, per
++     UhfSdk.isSupported()'s own contract of never throwing. -->
++<manifest xmlns:android="http://schemas.android.com/apk/res/android"
++    package="com.rockchip.uhf.sdk.sample">
++
++    <uses-feature android:name="android.hardware.uhf" android:required="false" />
++
++    <uses-permission android:name="android.permission.UHF_READ" />
++
++    <application
++        android:label="UHF SDK Sample"
++        android:allowBackup="false">
++        <activity
++            android:name=".MainActivity"
++            android:exported="true">
++            <intent-filter>
++                <action android:name="android.intent.action.MAIN" />
++                <category android:name="android.intent.category.LAUNCHER" />
++            </intent-filter>
++        </activity>
++    </application>
++</manifest>
+diff --git a/sample/src/main/java/com/rockchip/uhf/sdk/sample/MainActivity.kt b/sample/src/main/java/com/rockchip/uhf/sdk/sample/MainActivity.kt
+new file mode 100644
+index 0000000..21e94ad
+--- /dev/null
++++ b/sample/src/main/java/com/rockchip/uhf/sdk/sample/MainActivity.kt
+@@ -0,0 +1,132 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ * SDK-05 reference app: demonstrates every API group this SDK exposes, in the order UHF-SRS-001
++ * §5.1's own usage example presents them. This is a demonstration of API surface and permission
++ * handling, not a production UI — see README.md's "What's verified" section: this file has not
++ * been built with Gradle/AGP or run on a device or emulator in this environment.
++ */
++package com.rockchip.uhf.sdk.sample
++
++import android.app.Activity
++import android.content.pm.PackageManager
++import android.hardware.uhf.TagFilter
++import android.hardware.uhf.UhfException
++import android.os.Bundle
++import android.util.Log
++import android.widget.TextView
++import com.rockchip.uhf.sdk.UhfSdk
++import com.rockchip.uhf.sdk.UhfSdkSession
++import com.rockchip.uhf.sdk.inventorySuspend
++import com.rockchip.uhf.sdk.tagFlow
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.flow.catch
++import kotlinx.coroutines.flow.distinctUntilChangedBy
++import kotlinx.coroutines.flow.launchIn
++import kotlinx.coroutines.flow.onEach
++import kotlinx.coroutines.launch
++
++private const val TAG = "UhfSample"
++private const val REQUEST_UHF_PERMISSIONS = 1001
++
++class MainActivity : Activity() {
++    private lateinit var statusView: TextView
++    private var session: UhfSdkSession? = null
++
++    override fun onCreate(savedInstanceState: Bundle?) {
++        super.onCreate(savedInstanceState)
++        statusView = TextView(this)
++        setContentView(statusView)
++
++        // §5.1: never assume the feature exists — this is the one check every consumer of this
++        // SDK must do before anything else, and the SDK never throws just for asking.
++        if (!UhfSdk.isSupported(this)) {
++            statusView.text = "No UHF reader on this device."
++            return
++        }
++
++        if (checkSelfPermission("android.permission.UHF_READ")
++                != PackageManager.PERMISSION_GRANTED) {
++            requestPermissions(arrayOf("android.permission.UHF_READ"), REQUEST_UHF_PERMISSIONS)
++            return
++        }
++        openAndDemo()
++    }
++
++    override fun onRequestPermissionsResult(
++            requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
++        if (requestCode == REQUEST_UHF_PERMISSIONS
++                && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
++            openAndDemo()
++        } else {
++            statusView.text = "UHF_READ permission denied."
++        }
++    }
++
++    private fun openAndDemo() {
++        val s = try {
++            UhfSdk.open(this)
++        } catch (e: UhfException) {
++            // Falls back to the offline fake so this sample still demonstrates every API group
++            // on a device/emulator with no reader attached — the same fallback an app's own
++            // instrumented tests would use (SDK-09).
++            Log.w(TAG, "no real reader (${e.message}); using UhfSdk.openFake() instead")
++            UhfSdk.openFake()
++        }
++        session = s
++
++        // §4.6: antenna/throughput tradeoff (see README) — fewer ports, faster reads.
++        s.setEnabledAntennas(0b0001)
++        // §4.5: never exceed the safe ceiling without deliberately opting in.
++        s.setRfPower(20)
++
++        CoroutineScope(Dispatchers.Main).launch {
++            // SDK-08: suspend variant of the blocking inventory() call.
++            val tags = s.inventorySuspend()
++            statusView.text = "Polled inventory: ${tags.size} tag(s)"
++
++            if (tags.isNotEmpty()) {
++                demoTagMemory(s, tags.first().epc)
++            }
++
++            // SDK-08: Flow variant, matching UHF-SRS-001 §7's own sample almost verbatim.
++            s.tagFlow()
++                    .distinctUntilChangedBy { it.epcHex }
++                    .catch { e -> Log.w(TAG, "stream ended", e) }
++                    .onEach { tag -> Log.i(TAG, "${tag.epcHex}  rssi=${tag.rssi}") }
++                    .launchIn(CoroutineScope(Dispatchers.Main))
++        }
++    }
++
++    /** §4.10/§4.11: write, read back, and lock one tag's User bank — the pattern
++     * UhfSessionArbiterTest and FakeUhfSdkSessionTest both verify at the unit level. */
++    private fun demoTagMemory(s: UhfSdkSession, epc: ByteArray) {
++        val filter = TagFilter.byEpc(epc)
++        try {
++            s.writeTagMemory(filter, /* BANK_USER */ 3, /* wordAddress= */ 0,
++                    byteArrayOf(0x12, 0x34))
++            val readBack = s.readTagMemory(filter, 3, 0, 1)
++            Log.i(TAG, "wrote+verified ${readBack.size} bytes to tag ${filter.epc?.joinToString("")}")
++        } catch (e: UhfException) {
++            Log.w(TAG, "tag memory demo failed: ${e.message}")
++        }
++    }
++
++    override fun onDestroy() {
++        super.onDestroy()
++        session?.close()
++    }
++}
+diff --git a/settings.gradle.kts b/settings.gradle.kts
+new file mode 100644
+index 0000000..fda420a
+--- /dev/null
++++ b/settings.gradle.kts
+@@ -0,0 +1,3 @@
++// Structural — this Gradle project has not been opened/synced/built in this environment.
++rootProject.name = "uhf-sdk-workspace"
++include(":uhf-sdk", ":sample")
+diff --git a/uhf-sdk/README.md b/uhf-sdk/README.md
+new file mode 100644
+index 0000000..a46bed4
+--- /dev/null
++++ b/uhf-sdk/README.md
+@@ -0,0 +1,102 @@
++# uhf-sdk
++
++SDK-01/03/04/08/09: a thin Kotlin/Java facade over the platform's `android.hardware.uhf.UhfManager`
++(UHF-SRS-001), distributed as `com.rockchip.uhf:uhf-sdk` so third-party apps can build against it
++without platform source or `@SystemApi` access.
++
++## Integration guide (SDK-06)
++
++### Permissions
++
++Declare in your app's manifest:
++
++```xml
++<uses-permission android:name="android.permission.UHF_READ" />
++<!-- Only if your app writes tags: -->
++<uses-permission android:name="android.permission.UHF_WRITE" />
++```
++
++`UHF_READ` is `normal` (granted at install, no runtime prompt). `UHF_WRITE` is `dangerous` —
++request it at runtime the same way you would `CAMERA` or `RECORD_AUDIO`. Region, RF power and
++antenna configuration (`UHF_CONFIGURE`) are `signature|privileged` — not requestable by a normal
++app at all; those calls fail with `UhfException(ERROR_BUSY, ...)` for anything but a
++platform/OEM-signed caller. This SDK does not attempt to work around that: an app that needs
++`UHF_CONFIGURE` is an OEM/provisioning tool, not a third-party consumer of this SDK.
++
++Always call `UhfSdk.isSupported(context)` before `UhfSdk.open(context)` — it never throws, on any
++device, including one from a platform build that predates this SRS. `open()` on an unsupported
++device throws `UhfException(ERROR_DEVICE_LOST, ...)` rather than returning null, precisely so that
++skipping the check fails loudly in one place instead of a `NullPointerException` three calls later.
++
++### The antenna/throughput tradeoff
++
++Measured on the reference hardware (UHF-SRS-001 §2.4): streaming reads/sec roughly **halves with
++each additional antenna port enabled** (130.9 reads/sec at one port, 51.9 at four). If your
++application only needs read range, not multi-port coverage, `setEnabledAntennas(ANTENNA_1)`
++before streaming is the single highest-leverage performance decision available — no other setting
++comes close. `getReaderInfo()`'s antenna-mask field tells you what's currently enabled if you
++didn't set it explicitly.
++
++### The RF power ceiling
++
++`setRfPower()` refuses anything above the platform's safe ceiling (default 20/30) unless you pass
++`allowAboveSafeCeiling = true` explicitly. This exists because the reference hardware **browns out
++at 30/30** on its stock power supply — every command still answers normally, but inventory returns
++nothing, which reads as "the reader is broken" rather than "the power supply is undersized." Do not
++reach for the override flag to fix an inventory problem; if inventory suddenly returns nothing
++after a power change, that is the first thing to suspect, not a software bug.
++
++### Offline development (SDK-09)
++
++`UhfSdk.openFake()` returns a `UhfSdkSession` backed by an in-memory simulated reader — no device,
++no `@SystemApi` access, buildable and testable from a clean checkout. It enforces the same
++caller-visible contracts the platform does (an all-zero kill password is refused, a permanent lock
++needs explicit confirmation, an invalid word range is rejected) specifically so that code passing
++against the fake has already cleared the checks it will meet on real hardware. See
++`FakeUhfSdkSessionTest` for the full set of behaviors it guarantees.
++
++## Compatibility matrix (SDK-07)
++
++| SDK version | Requires platform API level | Notes |
++|---|---|---|
++| 1.0.x | UHF-SRS-001 Phase 1+ applied, SDK 34 (AOSP 14) | Session lifecycle, identity, region, power, antennas, polled/buffered inventory, streaming (§4.1-4.9). |
++| 1.1.x (planned) | UHF-SRS-001 Phase 3 applied | Adds tag memory access and security (§4.10-4.11) — `readTagMemory`/`writeTagMemory`/`killTag`/`lockTag`/etc. |
++| — | UHF-SRS-001 Phase 4/5 not yet implemented | Read protection, EAS, vendor extensions, and GPIO/peripherals have no SDK surface yet because the platform itself doesn't either. |
++
++The SDK is versioned independently of the platform build (SDK-07): a platform patch that only
++fixes a wire-protocol bug (see UHF-SRS-001's own Confirm-status command codes) does not require an
++SDK release, because this module adds no protocol logic of its own (SDK-03) — everything here is a
++1:1 delegation to `UhfManager`/`UhfSession`.
++
++## What's verified vs. what isn't
++
++Unlike most of this patch series (which could only be checked by reading, since no Android build
++toolchain was available), **this module's Java and Kotlin source was actually compiled and, for
++the fake reader, actually run**, using tools found in the surrounding AOSP tree rather than assumed
++unavailable:
++
++- `prebuilts/sdk/34/system/android.jar` — the real system-API stub jar — plus the platform's own
++  `android.hardware.uhf.*` sources compiled directly against it (this is what caught a real,
++  otherwise-silent bug: `IUhfService.aidl` needs a companion `<ClassName>.aidl` declaration file
++  for every custom Parcelable it references, which the platform commit had been missing since
++  Phase 1 — found by actually running `prebuilts/build-tools/linux-x86/bin/aidl`, not by reading
++  the file).
++- Every class in this module (`UhfSdk`, `UhfSdkSession`, `RealUhfSdkSession`,
++  `FakeUhfSdkSession`) compiles cleanly against that real platform output.
++- `UhfSdkKt.kt` (the coroutine/Flow adapters) was compiled with a real Kotlin 1.8.10 compiler
++  (`external/kotlinc/`) against a real `kotlinx-coroutines-core` jar. The decision to name the
++  suspend function `inventorySuspend()` rather than `inventory()` (colliding with the interface's
++  existing blocking member) was verified empirically, not assumed: a same-named suspend extension
++  compiles but is reported "shadowed by a member" and is unreachable through ordinary call syntax.
++- `FakeUhfSdkSessionTest`'s 12 tests were **compiled and actually executed** against JUnit 4, and
++  all pass — this includes exercising the fake's real background streaming (a genuine
++  `ScheduledExecutorService`, not a mock).
++- The sample app (`sdk/sample/`) compiles cleanly against the same real platform output.
++
++What is still unverified: no Gradle/AGP build of either module was performed (none was available
++in this environment), so packaging into an AAR, resource merging, and manifest merging are
++untested; no device or emulator run of the sample app happened; and the platform-generated stub
++jar SDK-02 asks for (built from `frameworks/base/core/api/current.txt`/`system-current.txt` via
++metalava) does not exist yet — this module's own verification used the real compiled platform
++classes directly instead, which proves the SDK's source is correct against the real API shape
++without yet having that specific packaged artifact.
+diff --git a/uhf-sdk/build.gradle.kts b/uhf-sdk/build.gradle.kts
+new file mode 100644
+index 0000000..4b9ded1
+--- /dev/null
++++ b/uhf-sdk/build.gradle.kts
+@@ -0,0 +1,50 @@
++// UHF-SRS-001 SDK-01/02/10. Structural — not built by this patch series (no Gradle/AGP available
++// in the environment this was written in; see README.md's "What's verified" section for what was
++// and wasn't actually run). Standard Android library module shape; the one non-standard piece is
++// compileOnlyApi'ing a stub jar instead of the usual compileSdk, since UhfManager/UhfSession are
++// @SystemApi and are not part of any public Android SDK level.
++plugins {
++    id("com.android.library")
++    id("org.jetbrains.kotlin.android")
++}
++
++android {
++    namespace = "com.rockchip.uhf.sdk"
++    compileSdk = 34
++
++    defaultConfig {
++        minSdk = 26 // arbitrary floor; the real constraint is "a device with this SRS applied"
++        consumerProguardFiles("consumer-rules.pro")
++    }
++
++    buildTypes {
++        release {
++            isMinifyEnabled = false
++            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
++        }
++    }
++
++    compileOptions {
++        sourceCompatibility = JavaVersion.VERSION_17
++        targetCompatibility = JavaVersion.VERSION_17
++    }
++
++    kotlinOptions {
++        jvmTarget = "17"
++    }
++}
++
++dependencies {
++    // SDK-02: compile-only stub jar generated from the platform's frameworks/base/api/core/
++    // current.txt + system-current.txt via `m sdk_stub` (or equivalent metalava invocation) —
++    // NOT produced by this patch series. Until it exists, point this at a locally built one:
++    //   compileOnly(files("libs/uhf-platform-stubs.jar"))
++    // This module's own verification during development used the real compiled platform classes
++    // directly (see README.md), which proves the SDK source is correct against the real API
++    // shape without yet having the metalava-generated stub artifact SDK-02 calls for.
++
++    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
++    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
++
++    testImplementation("junit:junit:4.13.2")
++}
+diff --git a/uhf-sdk/consumer-rules.pro b/uhf-sdk/consumer-rules.pro
+new file mode 100644
+index 0000000..6730f3a
+--- /dev/null
++++ b/uhf-sdk/consumer-rules.pro
+@@ -0,0 +1,8 @@
++# UHF-SRS-001 SDK-10. Keep the SDK's own public API surface intact under R8/minification in a
++# consuming app; the platform's android.hardware.uhf classes are framework code and are never
++# stripped or renamed by the app's own R8 pass regardless, so only this module's classes need a
++# rule here.
++-keep public class com.rockchip.uhf.sdk.UhfSdk { public *; }
++-keep public interface com.rockchip.uhf.sdk.UhfSdkSession { public *; }
++-keep public class com.rockchip.uhf.sdk.FakeUhfSdkSession { public *; }
++-keep class com.rockchip.uhf.sdk.UhfSdkKt { public *; }
+diff --git a/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/FakeUhfSdkSession.java b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/FakeUhfSdkSession.java
+new file mode 100644
+index 0000000..234483c
+--- /dev/null
++++ b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/FakeUhfSdkSession.java
+@@ -0,0 +1,435 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.rockchip.uhf.sdk;
++
++import android.hardware.uhf.InventoryParams;
++import android.hardware.uhf.StreamParams;
++import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.TagCallback;
++import android.hardware.uhf.TagFilter;
++import android.hardware.uhf.UhfException;
++import android.hardware.uhf.UhfReaderInfo;
++import android.hardware.uhf.UhfTag;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.Executor;
++import java.util.concurrent.Executors;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
++import java.util.concurrent.TimeUnit;
++
++/**
++ * SDK-09: an in-memory reader with no hardware behind it, for building and testing app logic
++ * offline. Enforces the same caller-visible contracts the real platform does — FR-SEC-02's
++ * all-zero kill password refusal, FR-SEC-04's permanent-lock confirmation, FR-MEM-06's word-range
++ * validation — so code that passes against the fake has already cleared the same checks it will
++ * hit against a real reader; a fake that skipped these would let a bug through in development that
++ * then breaks on hardware, which defeats the point of testing offline at all.
++ *
++ * <p>What it does <em>not</em> attempt to simulate: RF physics, antenna coverage, or any timing
++ * characteristic of the real link (see UHF-SRS-001 §2.4's measured throughput notes — those
++ * numbers are hardware-specific and this class does not pretend otherwise). It exists to exercise
++ * application logic, not to predict real-world read rates.
++ */
++public final class FakeUhfSdkSession implements UhfSdkSession {
++
++    /** One simulated tag's full state — the fake analog of what a real tag's own memory holds. */
++    private static final class FakeTag {
++        byte[] epc;
++        final Map<Integer, byte[]> banks = new LinkedHashMap<>(); // bank -> word-addressed bytes
++        byte[] accessPassword = new byte[4];
++        byte[] killPassword = new byte[4];
++        boolean killed;
++        int epcLock = LOCK_OPEN; // android.hardware.uhf.UhfSession.LOCK_OPEN's value
++    }
++
++    // Mirrors android.hardware.uhf.UhfSession's LOCK_* constants (values only — this class does
++    // not statically depend on UhfSession to keep the fake's own logic self-contained).
++    private static final int LOCK_OPEN = 0;
++    private static final int LOCK_PERM_OPEN = 2;
++    private static final int LOCK_PERM_LOCKED = 3;
++
++    private static final int BANK_RESERVED = 0;
++    private static final int BANK_EPC = 1;
++
++    private final Map<String, FakeTag> mTags = new LinkedHashMap<>(); // keyed by EPC hex
++    private final ScheduledExecutorService mScheduler = Executors.newSingleThreadScheduledExecutor(
++            r -> { Thread t = new Thread(r, "FakeUhfSdkSession"); t.setDaemon(true); return t; });
++
++    private volatile boolean mValid = true;
++    private int mRegion = 0b0100; // EU, matching this SRS's own development-unit default
++    private int mRfPower = 20;
++    private int mSafePowerCeiling = 20;
++    private int mAntennaMask = 0b0001;
++    private boolean mAntennaCheckEnabled;
++    private boolean mVerifyWrites = true;
++    private ScheduledFuture<?> mStreamFuture;
++    private final StreamStatsAccumulator mStats = new StreamStatsAccumulator();
++
++    public FakeUhfSdkSession() {
++        for (int i = 0; i < 5; i++) {
++            addSimulatedTag(new byte[] {(byte) 0xE2, 0x00, 0x00, 0x00, (byte) i});
++        }
++    }
++
++    /** Test control, not part of {@link UhfSdkSession}: adds one simulated tag with the given EPC
++     * (and empty Reserved/User banks, a zeroed TID). Safe to call at any time, including mid-test,
++     * to shape what the next {@link #inventory()} or stream batch reports. */
++    public void addSimulatedTag(byte[] epc) {
++        FakeTag tag = new FakeTag();
++        tag.epc = epc.clone();
++        mTags.put(toHex(epc), tag);
++    }
++
++    /** Test control: removes a simulated tag by EPC, if present. */
++    public void removeSimulatedTag(byte[] epc) {
++        mTags.remove(toHex(epc));
++    }
++
++    /** Test control: removes every simulated tag — useful for asserting an app's "no tags in
++     * field" empty-state handling. */
++    public void clearSimulatedTags() {
++        mTags.clear();
++    }
++
++    @Override public boolean isValid() { return mValid; }
++
++    @Override public void close() {
++        stopStreaming();
++        mValid = false;
++        mScheduler.shutdownNow();
++    }
++
++    private void requireValid() throws UhfException {
++        if (!mValid) {
++            throw new UhfException(UhfException.ERROR_BUSY, "session closed");
++        }
++    }
++
++    @Override public UhfReaderInfo getReaderInfo() throws UhfException {
++        requireValid();
++        return new UhfReaderInfo("1.24", 0, true, false, mRegion, "EU", 865.1, 867.9, 30,
++                1000, mAntennaMask, mAntennaCheckEnabled);
++    }
++
++    @Override public void setRegion(int bandCode) throws UhfException {
++        requireValid();
++        mRegion = bandCode;
++    }
++
++    @Override public void setRfPower(int power) throws UhfException {
++        setRfPower(power, false);
++    }
++
++    @Override public void setRfPower(int power, boolean allowAboveSafeCeiling)
++            throws UhfException {
++        requireValid();
++        if (power < 0 || power > 30) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                    "power " + power + " outside [0,30]");
++        }
++        if (power > mSafePowerCeiling && !allowAboveSafeCeiling) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                    "power " + power + " exceeds safe ceiling " + mSafePowerCeiling);
++        }
++        mRfPower = power;
++    }
++
++    @Override public int getRfPower() throws UhfException { requireValid(); return mRfPower; }
++
++    @Override public int getMaxRfPower() throws UhfException { requireValid(); return 30; }
++
++    @Override public int getSafeRfPowerCeiling() throws UhfException {
++        requireValid();
++        return mSafePowerCeiling;
++    }
++
++    @Override public void setEnabledAntennas(int mask) throws UhfException {
++        requireValid();
++        mAntennaMask = mask;
++    }
++
++    @Override public int getEnabledAntennas() throws UhfException {
++        requireValid();
++        return mAntennaMask;
++    }
++
++    @Override public void setAntennaCheckEnabled(boolean enabled) throws UhfException {
++        requireValid();
++        mAntennaCheckEnabled = enabled;
++    }
++
++    @Override public boolean isAntennaCheckEnabled() throws UhfException {
++        requireValid();
++        return mAntennaCheckEnabled;
++    }
++
++    @Override public List<UhfTag> inventory() throws UhfException {
++        return inventory(null);
++    }
++
++    @Override public List<UhfTag> inventory(InventoryParams params) throws UhfException {
++        requireValid();
++        List<UhfTag> out = new ArrayList<>();
++        long now = System.nanoTime();
++        int i = 0;
++        for (FakeTag tag : mTags.values()) {
++            if (tag.killed) continue;
++            out.add(new UhfTag(tag.epc, null, /* rssi= */ -40 - i, /* antenna= */ 1, now, i));
++            i++;
++        }
++        return out;
++    }
++
++    @Override public void setStreamParams(StreamParams params) throws UhfException {
++        requireValid();
++    }
++
++    @Override public void startStreaming(Executor executor, TagCallback callback)
++            throws UhfException {
++        requireValid();
++        stopStreaming();
++        mStats.onStreamStart();
++        mStreamFuture = mScheduler.scheduleWithFixedDelay(() -> {
++            List<UhfTag> batch;
++            try {
++                batch = inventory();
++            } catch (UhfException e) {
++                executor.execute(() -> callback.onStreamError(e.getErrorCode(), e.getMessage()));
++                return;
++            }
++            mStats.onBatch(batch);
++            executor.execute(() -> callback.onTagsRead(batch));
++        }, 0, 200, TimeUnit.MILLISECONDS); // arbitrary, not a throughput claim — see class doc
++    }
++
++    @Override public void stopStreaming() {
++        if (mStreamFuture != null) {
++            mStreamFuture.cancel(false);
++            mStreamFuture = null;
++        }
++    }
++
++    @Override public boolean isStreaming() throws UhfException {
++        requireValid();
++        return mStreamFuture != null && !mStreamFuture.isDone();
++    }
++
++    @Override public StreamStats getStreamStats() throws UhfException {
++        requireValid();
++        return mStats.snapshot();
++    }
++
++    @Override public void resetStreamStats() throws UhfException {
++        requireValid();
++        mStats.reset();
++    }
++
++    @Override public void startBufferedInventory(InventoryParams params) throws UhfException {
++        requireValid();
++    }
++
++    @Override public void stopBufferedInventory() {}
++
++    @Override public int getBufferedTagCount() throws UhfException {
++        requireValid();
++        int count = 0;
++        for (FakeTag tag : mTags.values()) if (!tag.killed) count++;
++        return count;
++    }
++
++    @Override public List<UhfTag> readBuffer() throws UhfException { return inventory(); }
++
++    @Override public void clearBuffer() throws UhfException { requireValid(); }
++
++    private FakeTag findTag(TagFilter filter) throws UhfException {
++        if (filter.isAny()) {
++            List<FakeTag> live = new ArrayList<>();
++            for (FakeTag t : mTags.values()) if (!t.killed) live.add(t);
++            if (live.size() != 1) {
++                throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                        "TagFilter.any() requires exactly one tag in field, found " + live.size());
++            }
++            return live.get(0);
++        }
++        byte[] key = filter.isByEpc() ? filter.getEpc() : filter.getTid();
++        FakeTag tag = mTags.get(toHex(key));
++        if (tag == null || tag.killed) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER, "no such tag in field");
++        }
++        return tag;
++    }
++
++    @Override public byte[] readTagMemory(TagFilter filter, int bank, int wordAddress,
++            int wordCount) throws UhfException {
++        requireValid();
++        requireValidWordRange(wordAddress, wordCount);
++        FakeTag tag = findTag(filter);
++        byte[] full = tag.banks.getOrDefault(bank, new byte[0]);
++        byte[] out = new byte[wordCount * 2];
++        int available = Math.max(0, Math.min(out.length, full.length - wordAddress * 2));
++        if (available > 0) {
++            System.arraycopy(full, wordAddress * 2, out, 0, available);
++        }
++        return out;
++    }
++
++    @Override public void writeTagMemory(TagFilter filter, int bank, int wordAddress, byte[] data)
++            throws UhfException {
++        requireValid();
++        if (data.length % 2 != 0) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                    "data length " + data.length + " is not a whole number of words");
++        }
++        requireValidWordRange(wordAddress, data.length / 2);
++        FakeTag tag = findTag(filter);
++        int neededLen = wordAddress * 2 + data.length;
++        byte[] full = tag.banks.getOrDefault(bank, new byte[0]);
++        if (full.length < neededLen) {
++            full = Arrays.copyOf(full, neededLen);
++        }
++        System.arraycopy(data, 0, full, wordAddress * 2, data.length);
++        tag.banks.put(bank, full);
++        if (mVerifyWrites) {
++            byte[] readBack = readTagMemory(filter, bank, wordAddress, data.length / 2);
++            if (!Arrays.equals(readBack, data)) {
++                throw new UhfException(UhfException.ERROR_PROTOCOL, "fake write verification "
++                        + "failed — this should not happen against the in-memory store");
++            }
++        }
++    }
++
++    @Override public void writeEpc(TagFilter filter, byte[] newEpc) throws UhfException {
++        requireValid();
++        FakeTag tag = findTag(filter);
++        if (tag.epcLock != LOCK_OPEN) {
++            throw new UhfException(UhfException.ERROR_COMMAND_REJECTED,
++                    "EPC bank is locked (state " + tag.epcLock + ") — lockTag() was called for "
++                            + "this tag's EPC region");
++        }
++        mTags.remove(toHex(tag.epc));
++        tag.epc = newEpc.clone();
++        mTags.put(toHex(newEpc), tag);
++    }
++
++    @Override public void blockWrite(TagFilter filter, int bank, int wordAddress, byte[] data)
++            throws UhfException {
++        writeTagMemory(filter, bank, wordAddress, data);
++    }
++
++    @Override public void blockErase(TagFilter filter, int bank, int wordAddress, int wordCount)
++            throws UhfException {
++        requireValid();
++        requireValidWordRange(wordAddress, wordCount);
++        writeTagMemory(filter, bank, wordAddress, new byte[wordCount * 2]);
++    }
++
++    @Override public void setVerifyWrites(boolean verify) throws UhfException {
++        requireValid();
++        mVerifyWrites = verify;
++    }
++
++    @Override public void killTag(TagFilter filter, byte[] killPassword) throws UhfException {
++        requireValid();
++        if (killPassword == null || killPassword.length != 4 || isAllZero(killPassword)) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                    "kill password must be exactly 4 bytes and non-zero (FR-SEC-02)");
++        }
++        findTag(filter).killed = true;
++    }
++
++    @Override public void lockTag(TagFilter filter, int region, int lockState,
++            byte[] accessPassword, boolean confirmIrreversible) throws UhfException {
++        requireValid();
++        boolean isPermanent = (lockState == LOCK_PERM_OPEN || lockState == LOCK_PERM_LOCKED);
++        if (isPermanent && !confirmIrreversible) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                    "permanent lock state requires confirmIrreversible=true (FR-SEC-04)");
++        }
++        FakeTag tag = findTag(filter);
++        if (region == BANK_EPC) {
++            tag.epcLock = lockState;
++        }
++    }
++
++    @Override public void setAccessPassword(TagFilter filter, byte[] oldPassword,
++            byte[] newPassword) throws UhfException {
++        requireValid();
++        findTag(filter).accessPassword = newPassword.clone();
++    }
++
++    @Override public void setKillPassword(TagFilter filter, byte[] accessPassword,
++            byte[] newKillPassword) throws UhfException {
++        requireValid();
++        findTag(filter).killPassword = newKillPassword.clone();
++    }
++
++    private static final int MAX_REASONABLE_WORD_COUNT = 128; // mirrors the platform's own bound
++
++    private static void requireValidWordRange(int wordAddress, int wordCount)
++            throws UhfException {
++        if (wordAddress < 0 || wordCount <= 0
++                || wordAddress + wordCount > MAX_REASONABLE_WORD_COUNT) {
++            throw new UhfException(UhfException.ERROR_INVALID_PARAMETER,
++                    "word range [" + wordAddress + ", " + (wordAddress + wordCount)
++                            + ") is invalid or exceeds " + MAX_REASONABLE_WORD_COUNT + " words");
++        }
++    }
++
++    private static boolean isAllZero(byte[] b) {
++        for (byte x : b) if (x != 0) return false;
++        return true;
++    }
++
++    private static String toHex(byte[] b) {
++        StringBuilder sb = new StringBuilder(b.length * 2);
++        for (byte x : b) sb.append(String.format("%02X", x));
++        return sb.toString();
++    }
++
++    /** Mirrors {@code com.android.server.uhf.UhfService}'s accumulator — same FR-STR-10
++     * "measure from the first delivered read" logic, reimplemented here since the SDK cannot
++     * depend on platform-internal code. */
++    private static final class StreamStatsAccumulator {
++        private long totalReadCount;
++        private long firstReadNanos = -1;
++
++        synchronized void onStreamStart() { /* elapsed base is set on first onBatch, not here */ }
++
++        synchronized void onBatch(List<UhfTag> batch) {
++            if (firstReadNanos < 0 && !batch.isEmpty()) {
++                firstReadNanos = System.nanoTime();
++            }
++            totalReadCount += batch.size();
++        }
++
++        synchronized StreamStats snapshot() {
++            long elapsedMs = firstReadNanos < 0 ? 0 : (System.nanoTime() - firstReadNanos) / 1_000_000;
++            double rate = elapsedMs > 0 ? (totalReadCount * 1000.0 / elapsedMs) : 0.0;
++            return new StreamStats(0, totalReadCount, rate, 0, elapsedMs);
++        }
++
++        synchronized void reset() {
++            totalReadCount = 0;
++            firstReadNanos = -1;
++        }
++    }
++}
+diff --git a/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/RealUhfSdkSession.java b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/RealUhfSdkSession.java
+new file mode 100644
+index 0000000..34f2311
+--- /dev/null
++++ b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/RealUhfSdkSession.java
+@@ -0,0 +1,178 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.rockchip.uhf.sdk;
++
++import android.hardware.uhf.InventoryParams;
++import android.hardware.uhf.StreamParams;
++import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.TagCallback;
++import android.hardware.uhf.TagFilter;
++import android.hardware.uhf.UhfException;
++import android.hardware.uhf.UhfReaderInfo;
++import android.hardware.uhf.UhfSession;
++import android.hardware.uhf.UhfTag;
++
++import java.util.List;
++import java.util.concurrent.Executor;
++
++/**
++ * SDK-03: pure 1:1 delegation to a real {@link UhfSession}, with zero protocol logic of its own —
++ * every method here is exactly "call the same method on the delegate, return what it returns."
++ * If this class ever does anything more than that, it has stopped being what SDK-03 requires.
++ */
++final class RealUhfSdkSession implements UhfSdkSession {
++    private final UhfSession mDelegate;
++
++    RealUhfSdkSession(UhfSession delegate) {
++        mDelegate = delegate;
++    }
++
++    @Override public boolean isValid() { return mDelegate.isValid(); }
++
++    @Override public void close() { mDelegate.close(); }
++
++    @Override public UhfReaderInfo getReaderInfo() throws UhfException {
++        return mDelegate.getReaderInfo();
++    }
++
++    @Override public void setRegion(int bandCode) throws UhfException {
++        mDelegate.setRegion(bandCode);
++    }
++
++    @Override public void setRfPower(int power) throws UhfException {
++        mDelegate.setRfPower(power);
++    }
++
++    @Override public void setRfPower(int power, boolean allowAboveSafeCeiling)
++            throws UhfException {
++        mDelegate.setRfPower(power, allowAboveSafeCeiling);
++    }
++
++    @Override public int getRfPower() throws UhfException { return mDelegate.getRfPower(); }
++
++    @Override public int getMaxRfPower() throws UhfException { return mDelegate.getMaxRfPower(); }
++
++    @Override public int getSafeRfPowerCeiling() throws UhfException {
++        return mDelegate.getSafeRfPowerCeiling();
++    }
++
++    @Override public void setEnabledAntennas(int mask) throws UhfException {
++        mDelegate.setEnabledAntennas(mask);
++    }
++
++    @Override public int getEnabledAntennas() throws UhfException {
++        return mDelegate.getEnabledAntennas();
++    }
++
++    @Override public void setAntennaCheckEnabled(boolean enabled) throws UhfException {
++        mDelegate.setAntennaCheckEnabled(enabled);
++    }
++
++    @Override public boolean isAntennaCheckEnabled() throws UhfException {
++        return mDelegate.isAntennaCheckEnabled();
++    }
++
++    @Override public List<UhfTag> inventory() throws UhfException { return mDelegate.inventory(); }
++
++    @Override public List<UhfTag> inventory(InventoryParams params) throws UhfException {
++        return mDelegate.inventory(params);
++    }
++
++    @Override public void setStreamParams(StreamParams params) throws UhfException {
++        mDelegate.setStreamParams(params);
++    }
++
++    @Override public void startStreaming(Executor executor, TagCallback callback)
++            throws UhfException {
++        mDelegate.startStreaming(executor, callback);
++    }
++
++    @Override public void stopStreaming() { mDelegate.stopStreaming(); }
++
++    @Override public boolean isStreaming() throws UhfException { return mDelegate.isStreaming(); }
++
++    @Override public StreamStats getStreamStats() throws UhfException {
++        return mDelegate.getStreamStats();
++    }
++
++    @Override public void resetStreamStats() throws UhfException {
++        mDelegate.resetStreamStats();
++    }
++
++    @Override public void startBufferedInventory(InventoryParams params) throws UhfException {
++        mDelegate.startBufferedInventory(params);
++    }
++
++    @Override public void stopBufferedInventory() { mDelegate.stopBufferedInventory(); }
++
++    @Override public int getBufferedTagCount() throws UhfException {
++        return mDelegate.getBufferedTagCount();
++    }
++
++    @Override public List<UhfTag> readBuffer() throws UhfException {
++        return mDelegate.readBuffer();
++    }
++
++    @Override public void clearBuffer() throws UhfException { mDelegate.clearBuffer(); }
++
++    @Override public byte[] readTagMemory(TagFilter filter, int bank, int wordAddress,
++            int wordCount) throws UhfException {
++        return mDelegate.readTagMemory(filter, bank, wordAddress, wordCount);
++    }
++
++    @Override public void writeTagMemory(TagFilter filter, int bank, int wordAddress, byte[] data)
++            throws UhfException {
++        mDelegate.writeTagMemory(filter, bank, wordAddress, data);
++    }
++
++    @Override public void writeEpc(TagFilter filter, byte[] newEpc) throws UhfException {
++        mDelegate.writeEpc(filter, newEpc);
++    }
++
++    @Override public void blockWrite(TagFilter filter, int bank, int wordAddress, byte[] data)
++            throws UhfException {
++        mDelegate.blockWrite(filter, bank, wordAddress, data);
++    }
++
++    @Override public void blockErase(TagFilter filter, int bank, int wordAddress, int wordCount)
++            throws UhfException {
++        mDelegate.blockErase(filter, bank, wordAddress, wordCount);
++    }
++
++    @Override public void setVerifyWrites(boolean verify) throws UhfException {
++        mDelegate.setVerifyWrites(verify);
++    }
++
++    @Override public void killTag(TagFilter filter, byte[] killPassword) throws UhfException {
++        mDelegate.killTag(filter, killPassword);
++    }
++
++    @Override public void lockTag(TagFilter filter, int region, int lockState,
++            byte[] accessPassword, boolean confirmIrreversible) throws UhfException {
++        mDelegate.lockTag(filter, region, lockState, accessPassword, confirmIrreversible);
++    }
++
++    @Override public void setAccessPassword(TagFilter filter, byte[] oldPassword,
++            byte[] newPassword) throws UhfException {
++        mDelegate.setAccessPassword(filter, oldPassword, newPassword);
++    }
++
++    @Override public void setKillPassword(TagFilter filter, byte[] accessPassword,
++            byte[] newKillPassword) throws UhfException {
++        mDelegate.setKillPassword(filter, accessPassword, newKillPassword);
++    }
++}
+diff --git a/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdk.java b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdk.java
+new file mode 100644
+index 0000000..0847b22
+--- /dev/null
++++ b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdk.java
+@@ -0,0 +1,72 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.rockchip.uhf.sdk;
++
++import android.content.Context;
++import android.content.pm.PackageManager;
++import android.hardware.uhf.UhfException;
++import android.hardware.uhf.UhfManager;
++
++/**
++ * SDK-01: the entry point third-party apps build against, distributed as {@code
++ * com.rockchip.uhf:uhf-sdk} (SDK-01's {@code com.<oem>.uhf:uhf-sdk} with the OEM this SRS was
++ * written for). {@code UhfManager}/{@code UhfSession} are {@code @SystemApi}, unreachable from a
++ * normal Gradle build without the platform source; this module's own build depends on the stub
++ * jar generated from the platform's API signature files instead (SDK-02) — see this module's
++ * README for how that stub is produced and its one known gap.
++ */
++public final class UhfSdk {
++
++    private UhfSdk() {}
++
++    /**
++     * SDK-04: never throws, on any device — including one running a platform build that predates
++     * this SRS entirely, as long as the SDK's own classes loaded (which requires nothing device-
++     * specific: {@code FEATURE_UHF_READER} and {@code UhfManager} are ordinary compiled-in
++     * framework classes on any device built from a tree with this patch series, present whether
++     * or not a reader is attached — the value returned is what varies, never whether the check
++     * itself is safe to make).
++     */
++    public static boolean isSupported(Context context) {
++        return context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_UHF_READER);
++    }
++
++    /**
++     * Opens a session against the real reader. Callers should check {@link #isSupported} first;
++     * this throws {@link UhfException} with {@link UhfException#ERROR_DEVICE_LOST} rather than
++     * returning null on a device with no reader, so a caller that skips the check still fails in
++     * one obvious place instead of getting a {@code NullPointerException} three calls later.
++     */
++    public static UhfSdkSession open(Context context) throws UhfException {
++        UhfManager manager = context.getSystemService(UhfManager.class);
++        if (manager == null) {
++            throw new UhfException(UhfException.ERROR_DEVICE_LOST,
++                    "no UHF reader on this device — call isSupported() before open()");
++        }
++        return new RealUhfSdkSession(manager.openSession());
++    }
++
++    /**
++     * SDK-09: an offline session backed by {@link FakeUhfSdkSession} — no reader, no {@code
++     * @SystemApi} access, no device required. For building and testing app logic without
++     * hardware; every write actually mutates the fake's in-memory tag store, so a
++     * write-then-read-back flow exercises the same code path an app would run against a real tag.
++     */
++    public static UhfSdkSession openFake() {
++        return new FakeUhfSdkSession();
++    }
++}
+diff --git a/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdkSession.java b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdkSession.java
+new file mode 100644
+index 0000000..7b93672
+--- /dev/null
++++ b/uhf-sdk/src/main/java/com/rockchip/uhf/sdk/UhfSdkSession.java
+@@ -0,0 +1,124 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.rockchip.uhf.sdk;
++
++import android.hardware.uhf.InventoryParams;
++import android.hardware.uhf.StreamParams;
++import android.hardware.uhf.StreamStats;
++import android.hardware.uhf.TagCallback;
++import android.hardware.uhf.TagFilter;
++import android.hardware.uhf.UhfException;
++import android.hardware.uhf.UhfReaderInfo;
++import android.hardware.uhf.UhfTag;
++
++import java.util.List;
++import java.util.concurrent.Executor;
++
++/**
++ * SDK-01/03/09: the method surface {@code android.hardware.uhf.UhfSession} exposes, reproduced as
++ * an interface so {@link UhfSdk} can hand out either a real, platform-API-backed session
++ * ({@link RealUhfSdkSession}) or an offline one with no reader and no {@code @SystemApi} access
++ * ({@link FakeUhfSdkSession}) behind the same type. This interface is the <em>only</em> reason an
++ * indirection exists at all — {@link RealUhfSdkSession} adds zero logic of its own beyond
++ * unwrapping exceptions that don't apply here (SDK-03: "a protocol fix in the platform shall not
++ * require an SDK release" — true here because this interface's shape mirrors {@code UhfSession}
++ * exactly, not because it adds any behavior).
++ *
++ * <p>Every method here matches its {@code UhfSession} counterpart's name, parameters and thrown
++ * exception, verified by direct comparison against the compiled platform class during this SDK's
++ * build (see this module's README) rather than left to drift.
++ */
++public interface UhfSdkSession extends AutoCloseable {
++    boolean isValid();
++
++    @Override
++    void close();
++
++    UhfReaderInfo getReaderInfo() throws UhfException;
++
++    void setRegion(int bandCode) throws UhfException;
++
++    void setRfPower(int power) throws UhfException;
++
++    void setRfPower(int power, boolean allowAboveSafeCeiling) throws UhfException;
++
++    int getRfPower() throws UhfException;
++
++    int getMaxRfPower() throws UhfException;
++
++    int getSafeRfPowerCeiling() throws UhfException;
++
++    void setEnabledAntennas(int mask) throws UhfException;
++
++    int getEnabledAntennas() throws UhfException;
++
++    void setAntennaCheckEnabled(boolean enabled) throws UhfException;
++
++    boolean isAntennaCheckEnabled() throws UhfException;
++
++    List<UhfTag> inventory() throws UhfException;
++
++    List<UhfTag> inventory(InventoryParams params) throws UhfException;
++
++    void setStreamParams(StreamParams params) throws UhfException;
++
++    void startStreaming(Executor executor, TagCallback callback) throws UhfException;
++
++    void stopStreaming();
++
++    boolean isStreaming() throws UhfException;
++
++    StreamStats getStreamStats() throws UhfException;
++
++    void resetStreamStats() throws UhfException;
++
++    void startBufferedInventory(InventoryParams params) throws UhfException;
++
++    void stopBufferedInventory();
++
++    int getBufferedTagCount() throws UhfException;
++
++    List<UhfTag> readBuffer() throws UhfException;
++
++    void clearBuffer() throws UhfException;
++
++    byte[] readTagMemory(TagFilter filter, int bank, int wordAddress, int wordCount)
++            throws UhfException;
++
++    void writeTagMemory(TagFilter filter, int bank, int wordAddress, byte[] data)
++            throws UhfException;
++
++    void writeEpc(TagFilter filter, byte[] newEpc) throws UhfException;
++
++    void blockWrite(TagFilter filter, int bank, int wordAddress, byte[] data) throws UhfException;
++
++    void blockErase(TagFilter filter, int bank, int wordAddress, int wordCount)
++            throws UhfException;
++
++    void setVerifyWrites(boolean verify) throws UhfException;
++
++    void killTag(TagFilter filter, byte[] killPassword) throws UhfException;
++
++    void lockTag(TagFilter filter, int region, int lockState, byte[] accessPassword,
++            boolean confirmIrreversible) throws UhfException;
++
++    void setAccessPassword(TagFilter filter, byte[] oldPassword, byte[] newPassword)
++            throws UhfException;
++
++    void setKillPassword(TagFilter filter, byte[] accessPassword, byte[] newKillPassword)
++            throws UhfException;
++}
+diff --git a/uhf-sdk/src/main/kotlin/com/rockchip/uhf/sdk/UhfSdkKt.kt b/uhf-sdk/src/main/kotlin/com/rockchip/uhf/sdk/UhfSdkKt.kt
+new file mode 100644
+index 0000000..0f53611
+--- /dev/null
++++ b/uhf-sdk/src/main/kotlin/com/rockchip/uhf/sdk/UhfSdkKt.kt
+@@ -0,0 +1,77 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.rockchip.uhf.sdk
++
++import android.hardware.uhf.StreamParams
++import android.hardware.uhf.TagCallback
++import android.hardware.uhf.UhfException
++import android.hardware.uhf.UhfTag
++import java.util.concurrent.Executor
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.channels.awaitClose
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.callbackFlow
++import kotlinx.coroutines.withContext
++
++/**
++ * SDK-08: Kotlin coroutine and [Flow] adapters over [UhfSdkSession].
++ *
++ * The suspend function here is deliberately **not** named `inventory` — verified empirically
++ * during this module's build (not assumed) that a `suspend fun UhfSdkSession.inventory()`
++ * extension is silently shadowed by [UhfSdkSession.inventory]'s existing blocking member with the
++ * same erased call shape: kotlinc compiles it but emits "extension is shadowed by a member" and
++ * the extension becomes unreachable through ordinary call syntax. [inventorySuspend] avoids that
++ * trap by not colliding with the member at all. [tagFlow] has no such collision (no member of that
++ * name exists) and matches the SRS's own naming exactly.
++ */
++
++/** Runs the interface's blocking [UhfSdkSession.inventory] on [Dispatchers.IO]. */
++suspend fun UhfSdkSession.inventorySuspend(): List<UhfTag> =
++        withContext(Dispatchers.IO) { inventory() }
++
++/**
++ * A cold [Flow] of tag reads: starts streaming when collection begins, stops when the collector
++ * cancels or the flow is otherwise torn down — mirroring [UhfSdkSession.startStreaming] /
++ * [UhfSdkSession.stopStreaming]'s own lifecycle rather than adding a second one. Errors from
++ * [TagCallback.onStreamError] close the flow with a [UhfException] carrying the same error code.
++ */
++@OptIn(ExperimentalCoroutinesApi::class)
++fun UhfSdkSession.tagFlow(params: StreamParams = StreamParams.Builder().build()): Flow<UhfTag> =
++        callbackFlow {
++    setStreamParams(params)
++    val executor = Executor { command -> command.run() } // callback bodies below are already
++                                                           // non-blocking; no extra thread needed
++    startStreaming(executor, object : TagCallback {
++        override fun onTagsRead(batch: MutableList<UhfTag>) {
++            for (tag in batch) {
++                trySend(tag)
++            }
++        }
++
++        override fun onStreamError(errorCode: Int, message: String) {
++            close(UhfException(errorCode, message))
++        }
++
++        override fun onBatchesDropped(count: Int) {
++            // FR-STR-11's drop signal has no Flow-shaped equivalent to surface through without
++            // changing the element type to something other than UhfTag; a collector that needs
++            // this stays on the Java TagCallback surface directly instead.
++        }
++    })
++    awaitClose { stopStreaming() }
++}
+diff --git a/uhf-sdk/src/test/java/com/rockchip/uhf/sdk/FakeUhfSdkSessionTest.java b/uhf-sdk/src/test/java/com/rockchip/uhf/sdk/FakeUhfSdkSessionTest.java
+new file mode 100644
+index 0000000..001f102
+--- /dev/null
++++ b/uhf-sdk/src/test/java/com/rockchip/uhf/sdk/FakeUhfSdkSessionTest.java
+@@ -0,0 +1,228 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package com.rockchip.uhf.sdk;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import android.hardware.uhf.TagFilter;
++import android.hardware.uhf.UhfException;
++import android.hardware.uhf.UhfTag;
++
++import org.junit.Test;
++
++import java.util.List;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.Executor;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicReference;
++
++/**
++ * Host-side JUnit tests for {@link FakeUhfSdkSession} (SDK-09), compiled and run against the real
++ * {@code android.hardware.uhf} classes (via the system-API stub jar) rather than any hand-rolled
++ * substitute — see this module's README for the exact toolchain. These exercise the same
++ * caller-visible contracts UhfSessionArbiterTest exercises against the platform arbiter
++ * (FR-SEC-02, FR-SEC-04, FR-MEM-06/07), because a fake that let those slip would defeat SDK-09's
++ * purpose: an app that only ever tested against a lenient fake would meet these checks for the
++ * first time on a real device.
++ */
++public class FakeUhfSdkSessionTest {
++
++    @Test
++    public void defaultConstructor_populatesFiveSimulatedTags() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        assertEquals(5, session.inventory().size());
++    }
++
++    @Test
++    public void addAndRemoveSimulatedTag_changeWhatInventoryReports() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        assertTrue(session.inventory().isEmpty());
++
++        byte[] epc = {1, 2, 3, 4};
++        session.addSimulatedTag(epc);
++        List<UhfTag> tags = session.inventory();
++        assertEquals(1, tags.size());
++        assertArrayEquals(epc, tags.get(0).getEpc());
++
++        session.removeSimulatedTag(epc);
++        assertTrue(session.inventory().isEmpty());
++    }
++
++    @Test
++    public void writeThenReadTagMemory_roundTrips() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        byte[] epc = {1, 1, 1, 1};
++        session.addSimulatedTag(epc);
++        TagFilter filter = TagFilter.byEpc(epc);
++
++        session.writeTagMemory(filter, 3 /* BANK_USER */, 0, new byte[] {0x55, 0x66});
++        byte[] readBack = session.readTagMemory(filter, 3, 0, 1);
++
++        assertArrayEquals(new byte[] {0x55, 0x66}, readBack);
++    }
++
++    @Test
++    public void readTagMemory_rejectsInvalidWordRange_sameAsThePlatform() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        byte[] epc = {2, 2, 2, 2};
++        session.addSimulatedTag(epc);
++
++        try {
++            session.readTagMemory(TagFilter.byEpc(epc), 3, -1, 2);
++            fail("expected rejection of a negative word address (FR-MEM-06)");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_INVALID_PARAMETER, expected.getErrorCode());
++        }
++    }
++
++    @Test
++    public void killTag_rejectsAllZeroPassword_sameAsThePlatform() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        byte[] epc = {3, 3, 3, 3};
++        session.addSimulatedTag(epc);
++
++        try {
++            session.killTag(TagFilter.byEpc(epc), new byte[] {0, 0, 0, 0});
++            fail("expected rejection of an all-zero kill password (FR-SEC-02)");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_INVALID_PARAMETER, expected.getErrorCode());
++        }
++        assertEquals("must not have been killed", 1, session.inventory().size());
++    }
++
++    @Test
++    public void killTag_withNonZeroPasswordRemovesItFromInventory() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        byte[] epc = {4, 4, 4, 4};
++        session.addSimulatedTag(epc);
++
++        session.killTag(TagFilter.byEpc(epc), new byte[] {0, 0, 0, 1});
++
++        assertTrue(session.inventory().isEmpty());
++    }
++
++    @Test
++    public void lockTag_permanentStateWithoutConfirmIsRejected_sameAsThePlatform()
++            throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        byte[] epc = {5, 5, 5, 5};
++        session.addSimulatedTag(epc);
++
++        try {
++            session.lockTag(TagFilter.byEpc(epc), /* region= BANK_EPC */ 1, /* LOCK_PERM_LOCKED */ 3,
++                    null, /* confirmIrreversible= */ false);
++            fail("expected rejection of a permanent lock without confirmation (FR-SEC-04)");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_INVALID_PARAMETER, expected.getErrorCode());
++        }
++        // Not locked: writeEpc must still succeed.
++        session.writeEpc(TagFilter.byEpc(epc), new byte[] {6, 6, 6, 6});
++    }
++
++    @Test
++    public void lockTag_permanentLockThenWriteEpcIsRejected() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        byte[] epc = {7, 7, 7, 7};
++        session.addSimulatedTag(epc);
++
++        session.lockTag(TagFilter.byEpc(epc), /* BANK_EPC */ 1, /* LOCK_PERM_LOCKED */ 3, null,
++                /* confirmIrreversible= */ true);
++
++        try {
++            session.writeEpc(TagFilter.byEpc(epc), new byte[] {8, 8, 8, 8});
++            fail("expected the fake to actually honour its own lock state");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_COMMAND_REJECTED, expected.getErrorCode());
++        }
++    }
++
++    @Test
++    public void findTag_anyRequiresExactlyOneTagInField() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.clearSimulatedTags();
++        session.addSimulatedTag(new byte[] {9, 9, 9, 9});
++        session.addSimulatedTag(new byte[] {9, 9, 9, 10});
++
++        try {
++            session.readTagMemory(TagFilter.any(), 3, 0, 1);
++            fail("expected rejection: two tags in field, TagFilter.any() is ambiguous");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_INVALID_PARAMETER, expected.getErrorCode());
++        }
++    }
++
++    @Test
++    public void setRfPower_enforcesTheSafeCeilingSameAsThePlatform() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        try {
++            session.setRfPower(25, false);
++            fail("expected rejection above the default safe ceiling of 20");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_INVALID_PARAMETER, expected.getErrorCode());
++        }
++        session.setRfPower(25, true); // override must succeed
++        assertEquals(25, session.getRfPower());
++    }
++
++    @Test
++    public void streaming_deliversBatchesUntilStopped() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        CountDownLatch gotBatch = new CountDownLatch(1);
++        AtomicReference<List<UhfTag>> lastBatch = new AtomicReference<>();
++        Executor immediate = Runnable::run;
++
++        session.startStreaming(immediate, new android.hardware.uhf.TagCallback() {
++            @Override public void onTagsRead(List<UhfTag> batch) {
++                lastBatch.set(batch);
++                gotBatch.countDown();
++            }
++            @Override public void onStreamError(int errorCode, String message) {}
++            @Override public void onBatchesDropped(int count) {}
++        });
++
++        assertTrue("expected at least one batch within 2s", gotBatch.await(2, TimeUnit.SECONDS));
++        assertTrue(session.isStreaming());
++        assertEquals(5, lastBatch.get().size());
++
++        session.stopStreaming();
++        assertFalse(session.isStreaming());
++    }
++
++    @Test
++    public void close_invalidatesTheSessionForFurtherCalls() throws Exception {
++        FakeUhfSdkSession session = new FakeUhfSdkSession();
++        session.close();
++        assertFalse(session.isValid());
++        try {
++            session.inventory();
++            fail("expected rejection of a call on a closed session");
++        } catch (UhfException expected) {
++            assertEquals(UhfException.ERROR_BUSY, expected.getErrorCode());
++        }
++    }
++}
+-- 
+2.34.1
+

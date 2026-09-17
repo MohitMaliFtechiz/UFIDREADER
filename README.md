@@ -18,7 +18,7 @@ patch's own header.
 | **1 — Vertical slice** | Session lifecycle, reader identity, region, RF power, antennas, polled/buffered inventory, streaming (SRS §4.1-4.9) | Done, including buffered inventory (§4.9), completed after the arbiter-level plumbing for it sat unreachable through one prior patch. Wire-protocol codec and session-arbitration policy are unit-tested (100 host-side JUnit tests, no hardware required); the AIDL/Binder/JNI layers are written but unbuilt (no framework build attempted, no reader hardware available in the environment this was built in). |
 | **2 — HAL split** | Vendor AIDL HAL (`rockchip.uhf.aidl`), native default implementation, sepolicy, VINTF | Done. The Phase 1 JNI shortcut is removed per the SRS's own exit criterion. Unbuilt/unverified for the same reasons as Phase 1. |
 | **3 — Tag operations** | Tag memory read/write, EPC rewrite, block write/erase, kill, lock, passwords (SRS §4.10-4.11) | Done for memory access and security. Read protection, EAS, and vendor extensions (§4.12-4.14) are **not implemented** — their wire payloads are unspecified beyond a command byte in the vendor manual, and guessing them wholesale seemed worse than leaving them open. |
-| **4 — SDK** | AAR, stub JAR, Kotlin adapters, sample app | Not started. |
+| **4 — SDK** | `com.rockchip.uhf:uhf-sdk` facade, Kotlin coroutine/Flow adapters, in-memory fake reader, sample app (SRS §7) | Done for the source layer. Unlike the phases above, this one was actually compiled (and, for the fake reader, actually run) with real tooling found in the build tree: `aidl`, the real system `android.jar`, a real Kotlin 1.8.10 compiler, and JUnit 4 — 12/12 tests pass, including genuine background streaming. No Gradle/AGP build, AAR packaging, metalava stub jar (SDK-02), or device run — see `patches/sdk`'s commit message and `uhf-sdk/README.md` in the patch for the full breakdown. |
 | **5 — Peripherals & hardening** | GPIO/relay/buzzer/Wiegand, buffered auto-drain, soak testing | Not started. |
 
 See `docs/UHF-SRS-001.html` for the full requirements specification, including which command codes
@@ -32,6 +32,7 @@ patches/
   hardware_rockchip_uhf/      1 patch   — the vendor AIDL HAL (new project)
   device_rockchip_rk3576/     2 patches — board wiring, ueventd, sepolicy, HAL packaging
   device_rockchip_common/     1 patch   — the one shared-file change, a single precedented import line
+  sdk/                        1 patch   — the uhf-sdk module (facade, fake reader, Kotlin adapters) + sample app
 docs/
   UHF-SRS-001.html            The software requirements spec this patch series implements
 ```
@@ -57,6 +58,15 @@ Apply in the order listed above — `frameworks/base`'s 5 patches are sequential
 the previous), and the `device/rockchip/rk3576` and `hardware/rockchip/uhf` patches assume the
 `frameworks/base` API surface already exists.
 
+`sdk/` is also pre-existing AOSP content in a stock tree (SDK tooling, sample apps, etc.) — apply
+its patch the same way as `frameworks/base`:
+
+```bash
+cd sdk && git am /path/to/UFIDREADER/patches/sdk/*.patch
+```
+
+It depends on `frameworks/base`'s `android.hardware.uhf` API surface existing, so apply it last.
+
 ## What's verified vs. what isn't
 
 Every patch's commit message states plainly what was and wasn't tested, following the same
@@ -71,6 +81,11 @@ Verified / Documented / Confirm convention the SRS itself uses for wire protocol
   toolchain to compile (the AIDL surface, `UhfService`, the HAL's C++ implementation, sepolicy) —
   no such build was attempted against this tree, and no reader hardware was available to exercise
   any of it end-to-end regardless.
+- **Compiled and, in part, executed**: the SDK module (`patches/sdk`) — real `aidl`, the real
+  system `android.jar`, a real Kotlin 1.8.10 compiler, and JUnit 4 were used to compile the whole
+  module against the real compiled platform classes and to run its 12-test suite (all pass). This
+  is a stronger bar than "written, not verified" above but still short of a full Gradle/AGP build
+  or a device run — see `uhf-sdk/README.md` inside the patch.
 - **Explicitly inferred, flagged inline**: a handful of wire payload layouts (tag memory/security
   command encodings, the optional inventory parameter triple) where the vendor protocol manual
   was not available. Each is isolated to one clearly-commented method so that a real hardware
