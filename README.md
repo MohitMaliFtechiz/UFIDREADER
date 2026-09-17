@@ -63,9 +63,69 @@ patches/
   device_rockchip_common/     1 patch    — the one shared-file change, a single precedented import line
   sdk/                        1 patch    — the uhf-sdk module (facade, fake reader, Kotlin adapters) + sample app
   kernel_logo/                1 patch    — ID TECH boot splash (U-Boot + kernel logo bitmaps)
+sdk/                          Plain source (not a patch) — same uhf-sdk/sample as patches/sdk, for browsing/reuse
+                              without an AOSP checkout
+apps/UhfTestApp/              Plain source (not a patch) — the standalone Soong platform test app (see below)
+dist/uhf-sdk-1.0.0.aar        A real, compiled AAR built from sdk/ (see "The AAR" below)
 docs/
   UHF-SRS-001.html            The software requirements spec this patch series implements
+  api/                        Generated Javadoc HTML for the SDK's public Java API
 ```
+
+## sdk/, apps/, and the AAR — plain source, not patches
+
+`patches/sdk/` and `patches/hardware_rockchip_uhf/` remain the way to apply this work onto a real
+AOSP checkout. `sdk/`, `apps/UhfTestApp/`, and `dist/uhf-sdk-1.0.0.aar` at the repo root are a
+different, complementary thing: the actual source and a built artifact, for anyone who wants to
+browse or reuse them without syncing an AOSP tree at all.
+
+- **`sdk/`** — an exact copy of `uhf-sdk/` and `sample/` from `patches/sdk`'s commit. Same code,
+  just not a diff. `uhf-sdk/build.gradle.kts` is a real Android Studio/Gradle library module
+  layout; open this directory in Android Studio the normal way once you have a real
+  `compileOnlyApi` stub jar for the platform's `@SystemApi` surface (see the AAR note below for
+  why this repo can't give you one built the usual way).
+- **`apps/UhfTestApp/`** — the platform smoke-test app, as a plain Soong (`Android.bp`) module,
+  not Gradle. It calls `android.hardware.uhf.UhfManager`/`UhfSession` directly rather than through
+  the SDK facade. This one was actually built and installed on real hardware in this project (see
+  its own commit message in `hardware_rockchip_uhf`'s git history) — it's here so you can read
+  working, on-device-confirmed example code without needing to build it yourself.
+
+### The AAR
+
+`dist/uhf-sdk-1.0.0.aar` is a real compiled artifact, not a placeholder — but it was **not**
+built by Gradle/AGP (still unavailable in every environment this project has been developed in).
+Instead:
+
+1. `sdk/uhf-sdk`'s four Java classes were compiled with the JDK's own `javac`, on the classpath of
+   `frameworks/base`'s actual compiled `framework.jar` (`turbine-combined`, the same classpath
+   form Soong itself uses to compile `services.core` against this exact API) — the real
+   `android.hardware.uhf.*` bytecode from a build that succeeded end-to-end, not a stub.
+2. `UhfSdkKt.kt` (the coroutine/Flow adapters) was compiled with a real Kotlin 1.8.10 compiler
+   against that same `framework.jar` plus the real, tree-built `kotlinx-coroutines-core-jvm.jar`.
+3. The resulting `.class` files were packed into `classes.jar` alongside a minimal generated
+   `AndroidManifest.xml` (`package="com.rockchip.uhf.sdk"`, no components — a library manifest,
+   matching what AGP's namespace-based manifest generation would have produced for a
+   resource-less library) and `consumer-rules.pro`, then zipped into the standard AAR layout by
+   hand.
+
+What that means in practice: the bytecode inside this AAR is real and was compiled against the
+real platform API, but the file wasn't put together by Gradle's `bundleReleaseAar` task, so it's
+missing whatever AGP-specific metadata (proguard consumer rule merging behavior, lint vectors,
+etc.) that task adds beyond a bare zip. For a library with no resources and no native code — which
+this is — that gap is close to cosmetic, but it's worth knowing before treating this AAR as
+identical to one `./gradlew :uhf-sdk:assembleRelease` would have produced.
+
+### API docs
+
+`docs/api/` is real generated Javadoc (`javadoc`, not hand-written HTML) covering the SDK's public
+Java surface — `UhfSdk`, `UhfSdkSession`, `FakeUhfSdkSession`. `RealUhfSdkSession` doesn't appear:
+it's package-private by design (SDK-03 — consumers only ever see it through the `UhfSdkSession`
+interface returned by `UhfSdk.open()`), so `javadoc` correctly excludes it, which is itself a
+small confirmation that the public API surface is what it's supposed to be. The Kotlin extension
+functions (`inventorySuspend()`, `tagFlow()`) aren't in this Javadoc — Dokka would be the right
+tool for those and isn't available here either — but they're documented with KDoc comments
+in-source (`sdk/uhf-sdk/src/main/kotlin/.../UhfSdkKt.kt`) and in `uhf-sdk/README.md`'s integration
+guide.
 
 ## Applying the patches
 

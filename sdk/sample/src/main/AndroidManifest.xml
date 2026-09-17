@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SDK-05 reference app manifest. uses-feature required="false": the sample must still install
+     and demonstrate the UhfSdk.openFake() fallback on a device/emulator with no reader, per
+     UhfSdk.isSupported()'s own contract of never throwing. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.rockchip.uhf.sdk.sample">
+
+    <uses-feature android:name="android.hardware.uhf" android:required="false" />
+
+    <uses-permission android:name="android.permission.UHF_READ" />
+
+    <application
+        android:label="UHF SDK Sample"
+        android:allowBackup="false">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

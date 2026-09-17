@@ -1,0 +1,1 @@
+typeSearchIndex = [{"l":"All Classes and Interfaces","u":"allclasses-index.html"},{"p":"com.rockchip.uhf.sdk","l":"FakeUhfSdkSession"},{"p":"com.rockchip.uhf.sdk","l":"UhfSdk"},{"p":"com.rockchip.uhf.sdk","l":"UhfSdkSession"}];updateSearchResults();

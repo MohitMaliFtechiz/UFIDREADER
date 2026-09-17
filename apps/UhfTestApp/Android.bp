@@ -1,0 +1,16 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+// Standalone platform test app for UHF-SRS-001 - not part of PRODUCT_PACKAGES (deliberately, so
+// it never forces a full image rebuild): build with `m UhfTestApp` against an already-lunch'd
+// rk3576_u tree and `adb install -r` the resulting APK directly. Calls android.hardware.uhf.*
+// (a @SystemApi surface) directly, unlike sdk/sample/ which goes through the uhf-sdk facade -
+// this app exists specifically to exercise the platform without depending on a Gradle build,
+// which this environment doesn't have.
+android_app {
+    name: "UhfTestApp",
+    srcs: ["src/**/*.java"],
+    platform_apis: true,
+    certificate: "platform",
+}
