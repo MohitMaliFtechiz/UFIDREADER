@@ -1,0 +1,66 @@
+From 3fc3a1547433d61c2e53c61914ffdea1c9e39f0d Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 11:20:40 +0200
+Subject: [PATCH 10/10] uhf: grant hal_uhf_default access to usb_serial_device,
+ not a bespoke uhf_device type
+
+Companion fix to device/rockchip/rk3576's file_contexts commit removing
+the uhf_device label for /dev/ttyUSB[0-9]* - that label collided with
+system/sepolicy/private/file_contexts' own platform-wide usb_serial_device
+label for the exact same pattern, a real sefcontext_compile failure hit
+by actually running the build.
+
+Dropped this file's own `type uhf_device, dev_type, file_type;`
+declaration (nothing labels that type anymore, so declaring it is dead
+weight) and changed the allow rule to target usb_serial_device
+(system/sepolicy/public/device.te) directly. Confirmed grep across the
+tree that the only other reference to usb_serial_device anywhere is
+hal_can_socketcan.te, an unrelated CAN-bus HAL not part of this product,
+so this doesn't open reader-device access to any domain beyond
+hal_uhf_default on rk3576_u - NFR-S-01 is unaffected.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/sepolicy/hal_uhf.te | 19 +++++++++++++------
+ 1 file changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/aidl/default/sepolicy/hal_uhf.te b/aidl/default/sepolicy/hal_uhf.te
+index 2282022..be1efca 100644
+--- a/aidl/default/sepolicy/hal_uhf.te
++++ b/aidl/default/sepolicy/hal_uhf.te
+@@ -5,11 +5,6 @@
+ type hal_uhf_default, domain;
+ type hal_uhf_default_exec, exec_type, vendor_file_type, file_type;
+ 
+-# Declared here (board-independent) so that any board using this HAL can label its own reader
+-# device node with it — see device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts for the
+-# board-specific path this type actually gets attached to.
+-type uhf_device, dev_type, file_type;
+-
+ init_daemon_domain(hal_uhf_default)
+ binder_use(hal_uhf_default)
+ 
+@@ -21,7 +16,19 @@ binder_call(hal_uhf_client, hal_uhf_server)
+ binder_call(hal_uhf_server, hal_uhf_client)
+ 
+ # NFR-S-01: only this domain may touch the reader's device node.
+-allow hal_uhf_default uhf_device:chr_file rw_file_perms;
++#
++# usb_serial_device (system/sepolicy/public/device.te), not a bespoke uhf_device type: a real
++# build (out/host/linux-x86/bin/sefcontext_compile) rejected a device-specific file_contexts entry
++# labeling /dev/ttyUSB[0-9]* as uhf_device, because system/sepolicy/private/file_contexts already
++# labels that exact same pattern usb_serial_device platform-wide (present since sepolicy API 30) —
++# "Multiple different specifications for /dev/ttyUSB[0-9]*". Confirmed no other domain in this
++# tree is granted usb_serial_device access on this product (hal_can_socketcan.te is the only other
++# reference tree-wide, an unrelated CAN-bus HAL not part of this product), so NFR-S-01 - only this
++# domain may touch the reader's node - still holds on rk3576_u even though the type itself is
++# platform-shared rather than bespoke. See device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts'
++# OI-05 TODO: this is still the same "every ttyUSB* on the board" approximation as before, just
++# expressed through the platform's own type instead of a colliding duplicate one.
++allow hal_uhf_default usb_serial_device:chr_file rw_file_perms;
+ 
+ # system_server is a client of this HAL (UhfHalTransport binds to rockchip.uhf.aidl.IUhfReader),
+ # but system_server must NOT itself hold the device node open — that is exactly the Treble
+-- 
+2.34.1
+

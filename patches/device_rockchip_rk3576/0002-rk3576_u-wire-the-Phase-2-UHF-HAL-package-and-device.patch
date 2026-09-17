@@ -1,7 +1,7 @@
 From 38b88fe4744f0d68e445ecde4bf404c62d64173a Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Tue, 15 Sep 2026 09:46:37 +0200
-Subject: [PATCH 2/2] rk3576_u: wire the Phase 2 UHF HAL package and
+Subject: [PATCH 2/3] rk3576_u: wire the Phase 2 UHF HAL package and
  device-node label
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

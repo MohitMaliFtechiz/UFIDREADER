@@ -1,7 +1,7 @@
 From bae9d565c7d6ec662893832b4a016813434ab8e2 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 08:04:56 +0200
-Subject: [PATCH 5/5] uhf: complete the sect4.9 buffered inventory public API
+Subject: [PATCH 05/13] uhf: complete the sect4.9 buffered inventory public API
  (FR-BUF-01..04)
 
 Closes a real gap from the Phase 1 commit: UhfSessionArbiter already had

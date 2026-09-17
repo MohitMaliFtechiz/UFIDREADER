@@ -1,7 +1,7 @@
 From 62f5c8e32e3aa3e38ee9fd5211084f42dfdd2534 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Tue, 15 Sep 2026 10:05:43 +0200
-Subject: [PATCH 4/4] uhf: add Phase 3 tag memory access and security
+Subject: [PATCH 04/13] uhf: add Phase 3 tag memory access and security
  operations (SRS sect4.10-4.11)
 
 Extends the AIDL/Manager/Session/arbiter/service stack from Phase 1/2 with

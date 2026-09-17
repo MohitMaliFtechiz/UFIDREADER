@@ -1,0 +1,40 @@
+From 45751f36f13522494f040c1c4e7e18fb86df0bee Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:47:53 +0200
+Subject: [PATCH 06/10] uhf: mark UhfRawTagRecord @VintfStability
+
+Real compiler failure, found by actually running
+`m rockchip.uhf.aidl-update-api` again after the previous commit added
+this parcelable:
+
+  ERROR: UhfRawTagRecord.aidl:29.11-27: rockchip.uhf.aidl.UhfRawTagRecord
+  does not have VINTF level stability (marked @VintfStability), but this
+  interface requires it in java
+
+Every type reachable from a `stability: "vintf"` interface - including a
+plain data-only parcelable referenced only as an array element type -
+must itself declare @VintfStability, so the whole reachable type graph
+gets the same stability guarantee. IUhfReader and IUhfReaderCallback
+already had it; the new UhfRawTagRecord parcelable just needed the same
+annotation added.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl b/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl
+index d96b363..3afedaa 100644
+--- a/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl
++++ b/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl
+@@ -26,6 +26,7 @@ package rockchip.uhf.aidl;
+  * as legal as an array of any other parcelable regardless of what variable-length data the
+  * parcelable itself carries.
+  */
++@VintfStability
+ parcelable UhfRawTagRecord {
+     byte[] data;
+ }
+-- 
+2.34.1
+

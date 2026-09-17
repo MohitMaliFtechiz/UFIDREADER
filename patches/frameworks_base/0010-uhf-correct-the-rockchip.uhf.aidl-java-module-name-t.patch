@@ -1,0 +1,53 @@
+From ba7985bc3afa327504994960e65085445e07369b Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:35:55 +0200
+Subject: [PATCH 10/13] uhf: correct the rockchip.uhf.aidl-java module name to
+ rockchip.uhf.aidl-V1-java
+
+Real build failure, found by actually running the build (not by
+inspection) - the previous commit's dependency name was wrong:
+
+  echo "module services.core.unboosted missing dependencies:
+  rockchip.uhf.aidl-java" && false
+
+Traced through system/tools/aidl/build/aidl_interface_backends.go:
+addJavaLibrary() names the generated module
+i.versionedName(version) + "-java", and versionedName("") returns the
+bare interface name only when version is the empty string. But
+aidlInterface.nextVersion() (aidl_interface.go:793) returns "" only when
+the interface is `unstable: true`; for anything else - including a
+`stability: "vintf"` interface with zero frozen versions, which is what
+rockchip.uhf.aidl is - it calls the package-level nextVersion([]string{})
+helper, which returns "1" for an empty version list. So even before this
+interface is ever frozen, its in-development "current" state is built as
+version "1" in every generated module name: rockchip.uhf.aidl-V1-java,
+not rockchip.uhf.aidl-java.
+
+This is consistent with (and now actually explains) the VINTF manifest
+fragments' pre-existing <version>1</version>, which earlier commits in
+this series noted as "conventionally treated as version 1" without
+tracing exactly why - this is why: it isn't a convention, it's what the
+unversioned build literally is named as soon as stability: "vintf" is
+set.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ services/core/Android.bp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/services/core/Android.bp b/services/core/Android.bp
+index c5cfe921..950ba17f 100644
+--- a/services/core/Android.bp
++++ b/services/core/Android.bp
+@@ -186,7 +186,7 @@ java_library_static {
+         "com.android.sysprop.watchdog",
+         "ImmutabilityAnnotation",
+         "securebox",
+-        "rockchip.uhf.aidl-java", // AIDL, UHF-SRS-001 - see com.android.server.uhf.UhfHalTransport
++        "rockchip.uhf.aidl-V1-java", // AIDL, UHF-SRS-001 - see com.android.server.uhf.UhfHalTransport
+     ],
+     javac_shard_size: 50,
+     javacflags: [
+-- 
+2.34.1
+

@@ -15,24 +15,54 @@ patch's own header.
 
 | Phase | Scope | Status |
 |---|---|---|
-| **1 — Vertical slice** | Session lifecycle, reader identity, region, RF power, antennas, polled/buffered inventory, streaming (SRS §4.1-4.9) | Done, including buffered inventory (§4.9), completed after the arbiter-level plumbing for it sat unreachable through one prior patch. Wire-protocol codec and session-arbitration policy are unit-tested (100 host-side JUnit tests, no hardware required); the AIDL/Binder/JNI layers are written but unbuilt (no framework build attempted, no reader hardware available in the environment this was built in). |
-| **2 — HAL split** | Vendor AIDL HAL (`rockchip.uhf.aidl`), native default implementation, sepolicy, VINTF | Done. The Phase 1 JNI shortcut is removed per the SRS's own exit criterion. Unbuilt/unverified for the same reasons as Phase 1. |
+| **1 — Vertical slice** | Session lifecycle, reader identity, region, RF power, antennas, polled/buffered inventory, streaming (SRS §4.1-4.9) | Done, including buffered inventory (§4.9). Wire-protocol codec and session-arbitration policy are unit-tested (100 host-side JUnit tests, no hardware required). The AIDL/Binder/JNI-turned-AIDL-HAL layers now **build cleanly end-to-end** — a full `lunch rk3576_u-userdebug && ./build.sh -K -A -p` against the real RK3576 AOSP 14 tree succeeds, producing a flashable `rockdev/Image-rk3576_u/`. No reader hardware was available to exercise it beyond that. |
+| **2 — HAL split** | Vendor AIDL HAL (`rockchip.uhf.aidl`), native default implementation, sepolicy, VINTF | Done. The Phase 1 JNI shortcut is removed per the SRS's own exit criterion. Builds cleanly (see above) — this phase's HAL is what most of the later patches (0002-0010 in `hardware_rockchip_uhf/`) exist to fix, once a real build actually exercised it. |
 | **3 — Tag operations** | Tag memory read/write, EPC rewrite, block write/erase, kill, lock, passwords (SRS §4.10-4.11) | Done for memory access and security. Read protection, EAS, and vendor extensions (§4.12-4.14) are **not implemented** — their wire payloads are unspecified beyond a command byte in the vendor manual, and guessing them wholesale seemed worse than leaving them open. |
 | **4 — SDK** | `com.rockchip.uhf:uhf-sdk` facade, Kotlin coroutine/Flow adapters, in-memory fake reader, sample app (SRS §7) | Done for the source layer. Unlike the phases above, this one was actually compiled (and, for the fake reader, actually run) with real tooling found in the build tree: `aidl`, the real system `android.jar`, a real Kotlin 1.8.10 compiler, and JUnit 4 — 12/12 tests pass, including genuine background streaming. No Gradle/AGP build, AAR packaging, metalava stub jar (SDK-02), or device run — see `patches/sdk`'s commit message and `uhf-sdk/README.md` in the patch for the full breakdown. |
 | **5 — Peripherals & hardening** | GPIO/relay/buzzer/Wiegand, buffered auto-drain, soak testing | Not started. |
+| **Boot branding** | ID TECH "Identity and Security" boot splash (`patches/kernel_logo`) | Done — replaces both the U-Boot and kernel splash bitmaps, baked into `resource.img` by a real kernel build. Not board-tested (no device attached in the build environment). |
 
 See `docs/UHF-SRS-001.html` for the full requirements specification, including which command codes
 are confirmed against hardware versus inferred and pending confirmation.
+
+## It actually builds now
+
+Every patch in `frameworks_base/` past 0005 and every patch in `hardware_rockchip_uhf/` past 0001
+exists because a real, full AOSP build (`lunch rk3576_u-userdebug && ./build.sh -K -A -p`) was
+run against this tree and something in it was wrong — found by reading the actual failing
+compiler/tool output, not by inspection. In order:
+
+- 7 missing AIDL parcelable declaration files (`aidl` refuses to compile a Parcelable reference
+  without one).
+- Two Metalava API Lint violations (`Ms` suffix instead of `Millis`, and a `MissingGetterMatchingBuilder`
+  case needing the same `@SuppressLint` pattern already used elsewhere in this tree).
+- `aidl_interface`'s `versions_with_info` declared without ever running the real freeze step, then
+  this tree's release-branch policy requiring an explicit `owner:` tag instead.
+- A wrong Soong-generated Java module name (`rockchip.uhf.aidl-V1-java`, not `-java` — an unfrozen
+  `stability: "vintf"` interface is still built as version "1").
+- `byte[][]`, then `List<byte[]>` — both illegal in structured AIDL — fixed with a one-field
+  `UhfRawTagRecord` parcelable wrapper, which itself then needed `@VintfStability`.
+- A missing checked-in AIDL "current" API dump (the AIDL analogue of `frameworks/base/api/*.txt`).
+- Missing `getInterfaceVersion()`/`getInterfaceHash()` overrides on the AIDL callback `Stub`.
+- A C++ namespace collision silently shadowing the wire-protocol functions with an empty
+  AIDL-generated namespace of the same name.
+- A `-Werror` unused-variable error on a genuinely dead constant.
+- A real sepolicy conflict: this project's own `/dev/ttyUSB[0-9]*` label collided with AOSP's
+  own platform-wide `usb_serial_device` rule for the identical pattern.
+
+The result: a full `rockdev/Image-rk3576_u/` flashable image set builds successfully against this
+tree today, with the UHF platform compiled in and the new boot logo baked into `resource.img`.
 
 ## Layout
 
 ```
 patches/
-  frameworks_base/            5 patches — framework API, system service, session arbiter, protocol codec
-  hardware_rockchip_uhf/      1 patch   — the vendor AIDL HAL (new project)
-  device_rockchip_rk3576/     2 patches — board wiring, ueventd, sepolicy, HAL packaging
-  device_rockchip_common/     1 patch   — the one shared-file change, a single precedented import line
-  sdk/                        1 patch   — the uhf-sdk module (facade, fake reader, Kotlin adapters) + sample app
+  frameworks_base/            13 patches — framework API, system service, session arbiter, protocol codec, real-build fixes
+  hardware_rockchip_uhf/      10 patches — the vendor AIDL HAL (new project), plus every real-build fix on top of it
+  device_rockchip_rk3576/     3 patches  — board wiring, ueventd, sepolicy, HAL packaging, sepolicy conflict fix
+  device_rockchip_common/     1 patch    — the one shared-file change, a single precedented import line
+  sdk/                        1 patch    — the uhf-sdk module (facade, fake reader, Kotlin adapters) + sample app
+  kernel_logo/                1 patch    — ID TECH boot splash (U-Boot + kernel logo bitmaps)
 docs/
   UHF-SRS-001.html            The software requirements spec this patch series implements
 ```
@@ -67,6 +97,15 @@ cd sdk && git am /path/to/UFIDREADER/patches/sdk/*.patch
 
 It depends on `frameworks/base`'s `android.hardware.uhf` API surface existing, so apply it last.
 
+`kernel_logo/` targets `kernel-6.1/` (also pre-existing content in a stock tree) and only touches
+two files, `logo.bmp` and `logo_kernel.bmp`:
+
+```bash
+cd kernel-6.1 && git am /path/to/UFIDREADER/patches/kernel_logo/*.patch
+```
+
+Independent of everything else in this series — apply it whenever, in any order.
+
 ## What's verified vs. what isn't
 
 Every patch's commit message states plainly what was and wasn't tested, following the same
@@ -77,10 +116,12 @@ Verified / Documented / Confirm convention the SRS itself uses for wire protocol
   ceiling, region persistence, the streaming/buffered/tag-op mutual-exclusion rules) — both are
   plain Java with no Android framework dependency, compiled and tested standalone against JUnit 4
   on a host JDK. 100 tests, all passing as of the last patch in this series.
-- **Written, not verified**: everything that needs a full AOSP framework build or native
-  toolchain to compile (the AIDL surface, `UhfService`, the HAL's C++ implementation, sepolicy) —
-  no such build was attempted against this tree, and no reader hardware was available to exercise
-  any of it end-to-end regardless.
+- **Actually built end-to-end**: a full `lunch rk3576_u-userdebug && ./build.sh -K -A -p` against
+  the real RK3576 AOSP 14 tree this patch series was developed on succeeds and produces a
+  flashable `rockdev/Image-rk3576_u/` — the AIDL surface, `UhfService`, the HAL's C++
+  implementation, and sepolicy all compile and package correctly. See "It actually builds now"
+  above for the real bugs that build run found and this series fixes. No reader hardware was
+  available to exercise any of it beyond a successful build/boot-image-package.
 - **Compiled and, in part, executed**: the SDK module (`patches/sdk`) — real `aidl`, the real
   system `android.jar`, a real Kotlin 1.8.10 compiler, and JUnit 4 were used to compile the whole
   module against the real compiled platform classes and to run its 12-test suite (all pass). This

@@ -1,0 +1,61 @@
+From 641605d9af1a9879386ba41fa030276e8190a99b Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:43:19 +0200
+Subject: [PATCH 12/13] uhf: adapt UhfHalTransport to IUhfReaderCallback's
+ UhfRawTagRecord[] change
+
+Companion fix to hardware/rockchip/uhf's follow-up commit wrapping
+onTagBatch's payload in the new UhfRawTagRecord parcelable, since neither
+byte[][] nor List<byte[]> turned out to be legal structured AIDL (both
+failures found by actually running `m rockchip.uhf.aidl-update-api`).
+
+The IUhfReaderCallback.Stub override in startStream() now takes
+UhfRawTagRecord[] and unwraps each element's .data back into a byte[][]
+at this one boundary point before forwarding to
+UhfTransport.StreamCallback#onTagBatch, whose own signature is a plain
+Java interface, not an AIDL type, and is unaffected by any of this.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/server/uhf/UhfHalTransport.java    | 18 +++++++++++-------
+ 1 file changed, 11 insertions(+), 7 deletions(-)
+
+diff --git a/services/core/java/com/android/server/uhf/UhfHalTransport.java b/services/core/java/com/android/server/uhf/UhfHalTransport.java
+index 85ae2cc2..9ab2889b 100644
+--- a/services/core/java/com/android/server/uhf/UhfHalTransport.java
++++ b/services/core/java/com/android/server/uhf/UhfHalTransport.java
+@@ -24,8 +24,7 @@ import android.util.Slog;
+ 
+ import rockchip.uhf.aidl.IUhfReader;
+ import rockchip.uhf.aidl.IUhfReaderCallback;
+-
+-import java.util.List;
++import rockchip.uhf.aidl.UhfRawTagRecord;
+ 
+ /**
+  * UHF-SRS-001 Phase 2's {@link UhfTransport}: a thin Binder proxy to the vendor HAL
+@@ -109,11 +108,16 @@ final class UhfHalTransport implements UhfTransport {
+     public void startStream(StreamCallback callback) throws UhfTransportException {
+         IUhfReaderCallback wrapper = new IUhfReaderCallback.Stub() {
+             @Override
+-            public void onTagBatch(List<byte[]> rawTagRecords) {
+-                // The AIDL boundary carries List<byte[]> (see IUhfReaderCallback.aidl's doc for
+-                // why); UhfTransport.StreamCallback's own signature is unaffected by that AIDL
+-                // restriction, so convert back to byte[][] at this one boundary point.
+-                callback.onTagBatch(rawTagRecords.toArray(new byte[0][]));
++            public void onTagBatch(UhfRawTagRecord[] rawTagRecords) {
++                // The AIDL boundary carries UhfRawTagRecord[] (see IUhfReaderCallback.aidl's doc
++                // for why byte[][] and List<byte[]> are both illegal there);
++                // UhfTransport.StreamCallback's own signature is unaffected by that AIDL
++                // restriction, so unwrap back to byte[][] at this one boundary point.
++                byte[][] raw = new byte[rawTagRecords.length][];
++                for (int i = 0; i < rawTagRecords.length; i++) {
++                    raw[i] = rawTagRecords[i].data;
++                }
++                callback.onTagBatch(raw);
+             }
+ 
+             @Override
+-- 
+2.34.1
+

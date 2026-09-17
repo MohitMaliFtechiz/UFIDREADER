@@ -1,0 +1,187 @@
+From 1383ac0dc07c8b1740af83908593aa08daacf165 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:25:39 +0200
+Subject: [PATCH 07/13] uhf: fix API Lint violations found by actually running
+ make update-api
+
+Real metalava api-lint errors, found by running the build (not by
+inspection):
+
+  InventoryParams.java:84: error: Expected method name units to be
+  `Millis or Micros`, was `Ms` in `getScanTimeMs` [MethodNameUnits]
+  InventoryParams.java:119: error: android.hardware.uhf.InventoryParams
+  does not declare a `getAntennaTargetScanTime()` method matching method
+  InventoryParams.Builder.setAntennaTargetScanTime(int,int,int)
+  [MissingGetterMatchingBuilder]
+  StreamParams.java:52,57,70: same MethodNameUnits error for
+  getReadPauseMs/getFilterTimeMs/getBatchWindowMs
+  UhfReaderInfo.java:109: same MethodNameUnits error for getScanTimeMs
+
+Fixes:
+- Renamed every Ms-suffixed getter/setter across InventoryParams,
+  StreamParams and UhfReaderInfo to the Millis form Android's API
+  guidelines require (getScanTimeMillis, getReadPauseMillis,
+  getFilterTimeMillis, getBatchWindowMillis, and the matching Builder
+  setters). Internal private fields (mScanTimeMs etc.) are left as-is -
+  api-lint only inspects the public method surface, and renaming the
+  fields too would just be diff noise.
+- Updated UhfService.java's one external call site
+  (params.getScanTimeMs() -> params.getScanTimeMillis()).
+- Added @SuppressLint("MissingGetterMatchingBuilder") to
+  setAntennaTargetScanTime(), matching real precedent for this exact
+  pattern elsewhere in this tree (ImageReader.Builder.setDefault*,
+  ImageWriter.Builder, JobWorkItem.Builder, etc. all suppress the same
+  check for multi-value setters whose components are exposed as
+  individually-named getters instead of one getter matching the
+  setter's name). getAntenna()/getTarget()/getScanTimeMillis() already
+  cover it; a fourth getAntennaTargetScanTime() would just duplicate them.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/hardware/uhf/InventoryParams.java | 11 ++++++--
+ .../android/hardware/uhf/StreamParams.java    | 26 +++++++++----------
+ .../android/hardware/uhf/UhfReaderInfo.java   |  2 +-
+ .../com/android/server/uhf/UhfService.java    |  2 +-
+ 4 files changed, 24 insertions(+), 17 deletions(-)
+
+diff --git a/core/java/android/hardware/uhf/InventoryParams.java b/core/java/android/hardware/uhf/InventoryParams.java
+index b745d87f..eac5836d 100644
+--- a/core/java/android/hardware/uhf/InventoryParams.java
++++ b/core/java/android/hardware/uhf/InventoryParams.java
+@@ -17,6 +17,7 @@
+ package android.hardware.uhf;
+ 
+ import android.annotation.NonNull;
++import android.annotation.SuppressLint;
+ import android.annotation.SystemApi;
+ import android.os.Parcel;
+ import android.os.Parcelable;
+@@ -66,7 +67,7 @@ public final class InventoryParams implements Parcelable {
+         return mSession;
+     }
+ 
+-    /** FR-INV-05: whether {@link #getAntenna()}/{@link #getTarget()}/{@link #getScanTimeMs()}
++    /** FR-INV-05: whether {@link #getAntenna()}/{@link #getTarget()}/{@link #getScanTimeMillis()}
+      * are populated. When {@code false} the reader's currently configured antenna mask, its
+      * default target, and its currently configured scan time apply instead. */
+     public boolean hasAntennaTargetScanTime() {
+@@ -81,7 +82,7 @@ public final class InventoryParams implements Parcelable {
+         return mTarget;
+     }
+ 
+-    public int getScanTimeMs() {
++    public int getScanTimeMillis() {
+         return mScanTimeMs;
+     }
+ 
+@@ -114,8 +115,14 @@ public final class InventoryParams implements Parcelable {
+          * Sets antenna, target and scan time together, per FR-INV-05. There is no way to set only
+          * one of the three: doing so at the wire level is a request the reader rejects, so the
+          * API does not offer it as three separate setters.
++         *
++         * <p>No single {@code getAntennaTargetScanTime()} matches this setter's name — the three
++         * values it sets are exposed individually instead, via {@link #getAntenna()},
++         * {@link #getTarget()} and {@link #getScanTimeMillis()}, which is what api-lint actually
++         * wants to see and a combined getter would only duplicate.
+          */
+         @NonNull
++        @SuppressLint("MissingGetterMatchingBuilder")
+         public Builder setAntennaTargetScanTime(int antennaPort, int target, int scanTimeMs) {
+             mHasAntennaTargetScanTime = true;
+             mAntenna = antennaPort;
+diff --git a/core/java/android/hardware/uhf/StreamParams.java b/core/java/android/hardware/uhf/StreamParams.java
+index 18cb5508..b51b96a8 100644
+--- a/core/java/android/hardware/uhf/StreamParams.java
++++ b/core/java/android/hardware/uhf/StreamParams.java
+@@ -49,12 +49,12 @@ public final class StreamParams implements Parcelable {
+         mUniqueOnly = b.mUniqueOnly;
+     }
+ 
+-    public int getReadPauseMs() {
++    public int getReadPauseMillis() {
+         return mReadPauseMs;
+     }
+ 
+     /** FR-STR-05: 0 (the default) reports every sighting; enabling filtering is an explicit choice. */
+-    public int getFilterTimeMs() {
++    public int getFilterTimeMillis() {
+         return mFilterTimeMs;
+     }
+ 
+@@ -67,7 +67,7 @@ public final class StreamParams implements Parcelable {
+     }
+ 
+     /** FR-STR-03: the batch flushes on whichever of this or {@link #getMaxBatchSize()} is first. */
+-    public int getBatchWindowMs() {
++    public int getBatchWindowMillis() {
+         return mBatchWindowMs;
+     }
+ 
+@@ -91,16 +91,16 @@ public final class StreamParams implements Parcelable {
+         private boolean mUniqueOnly = false;
+ 
+         @NonNull
+-        public Builder setReadPauseMs(int ms) {
+-            requireNonNegative(ms, "readPauseMs");
+-            mReadPauseMs = ms;
++        public Builder setReadPauseMillis(int millis) {
++            requireNonNegative(millis, "readPauseMillis");
++            mReadPauseMs = millis;
+             return this;
+         }
+ 
+         @NonNull
+-        public Builder setFilterTimeMs(int ms) {
+-            requireNonNegative(ms, "filterTimeMs");
+-            mFilterTimeMs = ms;
++        public Builder setFilterTimeMillis(int millis) {
++            requireNonNegative(millis, "filterTimeMillis");
++            mFilterTimeMs = millis;
+             return this;
+         }
+ 
+@@ -120,11 +120,11 @@ public final class StreamParams implements Parcelable {
+         }
+ 
+         @NonNull
+-        public Builder setBatchWindowMs(int ms) {
+-            if (ms <= 0) {
+-                throw new IllegalArgumentException("batchWindowMs must be positive, was " + ms);
++        public Builder setBatchWindowMillis(int millis) {
++            if (millis <= 0) {
++                throw new IllegalArgumentException("batchWindowMillis must be positive, was " + millis);
+             }
+-            mBatchWindowMs = ms;
++            mBatchWindowMs = millis;
+             return this;
+         }
+ 
+diff --git a/core/java/android/hardware/uhf/UhfReaderInfo.java b/core/java/android/hardware/uhf/UhfReaderInfo.java
+index 07607441..c890ad10 100644
+--- a/core/java/android/hardware/uhf/UhfReaderInfo.java
++++ b/core/java/android/hardware/uhf/UhfReaderInfo.java
+@@ -106,7 +106,7 @@ public final class UhfReaderInfo implements Parcelable {
+         return mMaxRfPower;
+     }
+ 
+-    public int getScanTimeMs() {
++    public int getScanTimeMillis() {
+         return mScanTimeMs;
+     }
+ 
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+index 8508fd9b..f1159b8d 100644
+--- a/services/core/java/com/android/server/uhf/UhfService.java
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -373,7 +373,7 @@ public final class UhfService extends SystemService {
+                     params.hasAntennaTargetScanTime(),
+                     params.getAntenna(),
+                     params.getTarget(),
+-                    params.getScanTimeMs()));
++                    params.getScanTimeMillis()));
+             int reportedAntenna = params.hasAntennaTargetScanTime() ? params.getAntenna() : 0;
+             return toUhfTags(records, reportedAntenna);
+         }
+-- 
+2.34.1
+

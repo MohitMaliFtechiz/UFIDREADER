@@ -1,0 +1,74 @@
+From 2f2cf3f32653b632a7827fe53ad1ba4ffb80590d Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:40:36 +0200
+Subject: [PATCH 04/10] uhf: use List<byte[]> instead of byte[][] in
+ IUhfReaderCallback
+
+Real compiler failure, found by actually running the build (not by
+inspection) - specifically by running `m rockchip.uhf.aidl-update-api`,
+the first time this interface's --dumpapi --structured path was ever
+exercised in this series:
+
+  ERROR: .../IUhfReaderCallback.aidl:30.23-30: Multi-dimensional arrays
+  must be fixed size.
+
+Confirmed against system/tools/aidl/aidl_unittest.cpp's own
+RejectArrayOfArray/RejectArrayOfFixedSizeArray/RejectFixedSizeArrayOfDynamicArray
+tests: AIDL unconditionally rejects any T[][] whose dimensions aren't
+each a fixed compile-time size - byte[][] was never valid AIDL, in any
+mode, it just hadn't been dumped/checked yet in this series (this
+interface was previously compiled directly from source in some manual
+checks, but --dumpapi's stricter structured validation is what actually
+catches this class of error, which is the entire reason that tooling
+exists). List<byte[]> is the correct idiom for a variable-length list of
+variable-length byte arrays.
+
+Changed:
+- IUhfReaderCallback.aidl: onTagBatch(in byte[][]) -> onTagBatch(in
+  List<byte[]>).
+- UhfHalTransport.java (frameworks/base): the IUhfReaderCallback.Stub
+  override now takes List<byte[]> and converts to byte[][] at that one
+  point via toArray(new byte[0][]) before forwarding to
+  UhfTransport.StreamCallback#onTagBatch, whose own signature is a plain
+  Java interface unaffected by AIDL's array restriction and so is
+  unchanged.
+- UhfReader.cpp (HAL side): no change needed. batch is already declared
+  std::vector<std::vector<uint8_t>>, which is exactly the NDK backend's
+  mapping for List<byte[]> (also what it would have generated for the
+  rejected byte[][], had that ever compiled) - this file was already
+  written compatibly with the correct type.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl b/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+index f026658..51b18f1 100644
+--- a/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
++++ b/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+@@ -23,11 +23,16 @@ package rockchip.uhf.aidl;
+  */
+ @VintfStability
+ oneway interface IUhfReaderCallback {
+-    /** One batch of raw, still-undecoded tag-record payloads (post status-byte-stripping) — the
+-     * same shape {@code UhfTransport.StreamCallback#onTagBatch} already expects, so
+-     * {@code UhfHalTransport} passes these straight through to {@code UhfProtocol.decodeTagRecords}
+-     * without change. */
+-    void onTagBatch(in byte[][] rawTagRecords);
++    /** One batch of raw, still-undecoded tag-record payloads (post status-byte-stripping), one
++     * element per record. {@code List<byte[]>}, not {@code byte[][]}: structured/stable AIDL
++     * (this interface is {@code @VintfStability}) rejects any multi-dimensional array that isn't
++     * fixed-size in every dimension — confirmed by actually running
++     * {@code m rockchip.uhf.aidl-update-api}, which failed on the original {@code byte[][]} with
++     * "Multi-dimensional arrays must be fixed size." {@code List<byte[]>} is the standard AIDL
++     * idiom for a variable-length list of variable-length byte arrays. {@code UhfHalTransport}
++     * converts this back to the {@code byte[][]} shape {@code UhfTransport.StreamCallback#onTagBatch}
++     * expects before passing it on to {@code UhfProtocol.decodeTagRecords}. */
++    void onTagBatch(in List<byte[]> rawTagRecords);
+ 
+     /** {@code errorCode} matches {@code UhfTransportException}'s stable error codes. */
+     void onError(int errorCode);
+-- 
+2.34.1
+

@@ -1,0 +1,223 @@
+From 2e677db82c4b12a713d5bdfc08c6575a58dfa089 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 08:44:39 +0200
+Subject: [PATCH 06/13] uhf: add missing parcelable declaration files for the
+ AIDL interfaces
+
+Every custom Parcelable referenced from an AIDL interface needs a
+matching <ClassName>.aidl declaration file (`parcelable ClassName;`) in
+the same package - without one, the aidl compiler cannot resolve the
+import and IUhfService.aidl fails to compile at all. Missing since the
+first Phase 1 commit; found by actually running the aidl compiler and
+javac against this package for the first time (prebuilts/build-tools
+aidl + prebuilts/sdk/34/system/android.jar were available in this
+environment, so this was verified for real rather than by inspection).
+
+With these seven files added, the aidl compiler generates
+IUhfService/IUhfTagCallback/IUhfStateCallback cleanly, and the entire
+android.hardware.uhf package - all Parcelables, UhfManager, UhfSession,
+TagFilter, TagCallback, UhfException, and the three generated AIDL
+interfaces - compiles against the real system-API stub jar with zero
+errors (one expected miss, Context.UHF_SERVICE, because the prebuilt
+stub jar predates this local edit to Context.java - confirmed to be the
+only issue by substituting a literal in a scratch copy and recompiling).
+
+This is the strongest verification this framework layer has had in this
+series: real javac/aidl output, not cross-referencing scripts.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/hardware/uhf/InventoryParams.aidl | 19 +++++++++++++++++++
+ .../android/hardware/uhf/StreamParams.aidl    | 19 +++++++++++++++++++
+ .../android/hardware/uhf/StreamStats.aidl     | 19 +++++++++++++++++++
+ core/java/android/hardware/uhf/TagFilter.aidl | 19 +++++++++++++++++++
+ .../android/hardware/uhf/UhfDeviceInfo.aidl   | 19 +++++++++++++++++++
+ .../android/hardware/uhf/UhfReaderInfo.aidl   | 19 +++++++++++++++++++
+ core/java/android/hardware/uhf/UhfTag.aidl    | 19 +++++++++++++++++++
+ 7 files changed, 133 insertions(+)
+ create mode 100644 core/java/android/hardware/uhf/InventoryParams.aidl
+ create mode 100644 core/java/android/hardware/uhf/StreamParams.aidl
+ create mode 100644 core/java/android/hardware/uhf/StreamStats.aidl
+ create mode 100644 core/java/android/hardware/uhf/TagFilter.aidl
+ create mode 100644 core/java/android/hardware/uhf/UhfDeviceInfo.aidl
+ create mode 100644 core/java/android/hardware/uhf/UhfReaderInfo.aidl
+ create mode 100644 core/java/android/hardware/uhf/UhfTag.aidl
+
+diff --git a/core/java/android/hardware/uhf/InventoryParams.aidl b/core/java/android/hardware/uhf/InventoryParams.aidl
+new file mode 100644
+index 00000000..af30ef1d
+--- /dev/null
++++ b/core/java/android/hardware/uhf/InventoryParams.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable InventoryParams;
+diff --git a/core/java/android/hardware/uhf/StreamParams.aidl b/core/java/android/hardware/uhf/StreamParams.aidl
+new file mode 100644
+index 00000000..ab86f080
+--- /dev/null
++++ b/core/java/android/hardware/uhf/StreamParams.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable StreamParams;
+diff --git a/core/java/android/hardware/uhf/StreamStats.aidl b/core/java/android/hardware/uhf/StreamStats.aidl
+new file mode 100644
+index 00000000..01cef493
+--- /dev/null
++++ b/core/java/android/hardware/uhf/StreamStats.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable StreamStats;
+diff --git a/core/java/android/hardware/uhf/TagFilter.aidl b/core/java/android/hardware/uhf/TagFilter.aidl
+new file mode 100644
+index 00000000..8d52d2db
+--- /dev/null
++++ b/core/java/android/hardware/uhf/TagFilter.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable TagFilter;
+diff --git a/core/java/android/hardware/uhf/UhfDeviceInfo.aidl b/core/java/android/hardware/uhf/UhfDeviceInfo.aidl
+new file mode 100644
+index 00000000..e4a15dde
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfDeviceInfo.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable UhfDeviceInfo;
+diff --git a/core/java/android/hardware/uhf/UhfReaderInfo.aidl b/core/java/android/hardware/uhf/UhfReaderInfo.aidl
+new file mode 100644
+index 00000000..36a7f243
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfReaderInfo.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable UhfReaderInfo;
+diff --git a/core/java/android/hardware/uhf/UhfTag.aidl b/core/java/android/hardware/uhf/UhfTag.aidl
+new file mode 100644
+index 00000000..eb1bfe37
+--- /dev/null
++++ b/core/java/android/hardware/uhf/UhfTag.aidl
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.hardware.uhf;
++
++parcelable UhfTag;
+-- 
+2.34.1
+

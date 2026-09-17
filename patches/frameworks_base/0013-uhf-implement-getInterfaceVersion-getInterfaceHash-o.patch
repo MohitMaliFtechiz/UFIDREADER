@@ -1,0 +1,58 @@
+From 1bdb7e7a169b1b66ea0184577ea91357dd546017 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:53:20 +0200
+Subject: [PATCH 13/13] uhf: implement getInterfaceVersion/getInterfaceHash on
+ the IUhfReaderCallback.Stub
+
+Real compile error, found by actually running the build (not by
+inspection) - the first time UhfHalTransport.java's anonymous
+IUhfReaderCallback.Stub was compiled against the real generated AIDL
+Java class rather than just checked by hand:
+
+  UhfHalTransport.java:109: error: <anonymous
+  com.android.server.uhf.UhfHalTransport$1> is not abstract and does not
+  override abstract method getInterfaceHash() in IUhfReaderCallback
+
+Confirmed against the actual generated
+out/soong/.../rockchip.uhf.aidl-V1-java-source/gen/rockchip/uhf/aidl/IUhfReaderCallback.java:
+Stub only supplies a body for onTransact()'s dispatch to
+getInterfaceVersion()/getInterfaceHash() - it does not implement them
+itself (only the separate IUhfReaderCallback.Default class does, which
+this anonymous class doesn't extend). Every concrete Stub subclass has to
+supply both. This isn't specific to our interface: real precedent in this
+same tree, ThermalManagerService's own anonymous IThermalEventListener.Stub,
+does exactly the same two-method override with the same
+`return this.VERSION;` / `return this.HASH;` idiom.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../com/android/server/uhf/UhfHalTransport.java     | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/services/core/java/com/android/server/uhf/UhfHalTransport.java b/services/core/java/com/android/server/uhf/UhfHalTransport.java
+index 9ab2889b..b0615bf2 100644
+--- a/services/core/java/com/android/server/uhf/UhfHalTransport.java
++++ b/services/core/java/com/android/server/uhf/UhfHalTransport.java
+@@ -125,6 +125,19 @@ final class UhfHalTransport implements UhfTransport {
+                 mStreaming = false;
+                 callback.onError(errorCode);
+             }
++
++            // IUhfReaderCallback.Stub leaves these abstract (real AOSP precedent:
++            // ThermalManagerService's own anonymous IThermalEventListener.Stub does the same) -
++            // every concrete Stub subclass must supply them itself.
++            @Override
++            public int getInterfaceVersion() {
++                return IUhfReaderCallback.VERSION;
++            }
++
++            @Override
++            public String getInterfaceHash() {
++                return IUhfReaderCallback.HASH;
++            }
+         };
+         try {
+             getHal().startStream(wrapper);
+-- 
+2.34.1
+

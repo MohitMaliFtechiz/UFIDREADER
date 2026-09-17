@@ -1,0 +1,159 @@
+From 9f0a8fd725d6cd644352579ed0fc94a362f86ff1 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:43:04 +0200
+Subject: [PATCH 05/10] uhf: List<byte[]> isn't legal structured AIDL either -
+ wrap in a parcelable
+
+Real compiler failure, found by actually running
+`m rockchip.uhf.aidl-update-api` again after the previous commit's fix:
+
+  ERROR: IUhfReaderCallback.aidl:35.23-28: List of arrays is not
+  supported. List<T> supports interface/parcelable/union, String,
+  IBinder, and ParcelFileDescriptor.
+
+So neither byte[][] (previous failure) nor List<byte[]> (this one) is
+legal in a structured/stable AIDL interface. The only way to carry a
+variable number of variable-length byte arrays is an array (or List) of
+something List<T>/T[] IS allowed to hold - a parcelable. Added
+UhfRawTagRecord, a one-field wrapper (`byte[] data;`), and changed
+onTagBatch to take UhfRawTagRecord[] - a single-dimensional array of a
+parcelable, which is exactly as legal as an array of any other
+parcelable regardless of how much variable-length data each element
+carries internally.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/UhfReader.cpp                    | 10 ++++--
+ aidl/default/UhfReader.h                      |  2 ++
+ .../rockchip/uhf/aidl/IUhfReaderCallback.aidl | 21 +++++++------
+ aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl   | 31 +++++++++++++++++++
+ 4 files changed, 53 insertions(+), 11 deletions(-)
+ create mode 100644 aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl
+
+diff --git a/aidl/default/UhfReader.cpp b/aidl/default/UhfReader.cpp
+index e940241..41a9ee2 100644
+--- a/aidl/default/UhfReader.cpp
++++ b/aidl/default/UhfReader.cpp
+@@ -259,7 +259,11 @@ void UhfReader::pumpLoop(std::shared_ptr<IUhfReaderCallback> callback) {
+         }
+         bool stale = (nowNanos() - lastByteAt) > kInterByteGapNanos;
+ 
+-        std::vector<std::vector<uint8_t>> batch;
++        // UhfRawTagRecord, not std::vector<std::vector<uint8_t>>: structured/stable AIDL accepts
++        // neither byte[][] nor List<byte[]> for IUhfReaderCallback#onTagBatch (confirmed by
++        // actually running m rockchip.uhf.aidl-update-api against both), so the .aidl declares
++        // UhfRawTagRecord[] instead - an array of a one-field parcelable wrapping byte[].
++        std::vector<UhfRawTagRecord> batch;
+         size_t offset = 0;
+         while (offset < len) {
+             auto r = rockchip::uhf::scanWithStallRecovery(buf + offset, len - offset, stale);
+@@ -272,7 +276,9 @@ void UhfReader::pumpLoop(std::shared_ptr<IUhfReaderCallback> callback) {
+             }
+             offset += r.frame.wireLength;
+             if (r.frame.command == 0xEE) { // real-time tag frame, UHF-SRS-001 §1.3
+-                batch.push_back(r.frame.data);
++                UhfRawTagRecord record;
++                record.data = r.frame.data;
++                batch.push_back(std::move(record));
+             }
+         }
+         if (offset > 0) {
+diff --git a/aidl/default/UhfReader.h b/aidl/default/UhfReader.h
+index 9cc52d6..e9856f1 100644
+--- a/aidl/default/UhfReader.h
++++ b/aidl/default/UhfReader.h
+@@ -20,6 +20,7 @@
+ // out/soong/.intermediates/.../aidl_interface/... once this target has actually been built (it
+ // has not, in this environment — see service.cpp's header comment).
+ #include <aidl/rockchip/uhf/aidl/BnUhfReader.h>
++#include <aidl/rockchip/uhf/aidl/UhfRawTagRecord.h>
+ 
+ #include <atomic>
+ #include <mutex>
+@@ -33,6 +34,7 @@ namespace impl {
+ 
+ using ::aidl::rockchip::uhf::aidl::BnUhfReader;
+ using ::aidl::rockchip::uhf::aidl::IUhfReaderCallback;
++using ::aidl::rockchip::uhf::aidl::UhfRawTagRecord;
+ 
+ /**
+  * UHF-SRS-001 Phase 2 default HAL implementation. Owns the tty and the framing/CRC/resync logic
+diff --git a/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl b/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+index 51b18f1..f18e03b 100644
+--- a/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
++++ b/aidl/rockchip/uhf/aidl/IUhfReaderCallback.aidl
+@@ -16,6 +16,8 @@
+ 
+ package rockchip.uhf.aidl;
+ 
++import rockchip.uhf.aidl.UhfRawTagRecord;
++
+ /**
+  * Delivery from the HAL's pump thread to {@code UhfHalTransport} in system_server.
+  * {@code oneway}: per UHF-SRS-001 §3.3, the pump thread must never block on system_server being
+@@ -24,15 +26,16 @@ package rockchip.uhf.aidl;
+ @VintfStability
+ oneway interface IUhfReaderCallback {
+     /** One batch of raw, still-undecoded tag-record payloads (post status-byte-stripping), one
+-     * element per record. {@code List<byte[]>}, not {@code byte[][]}: structured/stable AIDL
+-     * (this interface is {@code @VintfStability}) rejects any multi-dimensional array that isn't
+-     * fixed-size in every dimension — confirmed by actually running
+-     * {@code m rockchip.uhf.aidl-update-api}, which failed on the original {@code byte[][]} with
+-     * "Multi-dimensional arrays must be fixed size." {@code List<byte[]>} is the standard AIDL
+-     * idiom for a variable-length list of variable-length byte arrays. {@code UhfHalTransport}
+-     * converts this back to the {@code byte[][]} shape {@code UhfTransport.StreamCallback#onTagBatch}
+-     * expects before passing it on to {@code UhfProtocol.decodeTagRecords}. */
+-    void onTagBatch(in List<byte[]> rawTagRecords);
++     * element per record. {@link UhfRawTagRecord}{@code []}, not {@code byte[][]} or
++     * {@code List<byte[]>}: structured/stable AIDL (this interface is {@code @VintfStability})
++     * accepts neither — confirmed by actually running {@code m rockchip.uhf.aidl-update-api}
++     * against both in turn, first "Multi-dimensional arrays must be fixed size," then "List of
++     * arrays is not supported." An array of a parcelable is fully legal regardless of what
++     * variable-length data the parcelable itself holds, so {@link UhfRawTagRecord} exists purely
++     * to make that true here. {@code UhfHalTransport} unwraps this back to the {@code byte[][]}
++     * shape {@code UhfTransport.StreamCallback#onTagBatch} expects before passing it on to
++     * {@code UhfProtocol.decodeTagRecords}. */
++    void onTagBatch(in UhfRawTagRecord[] rawTagRecords);
+ 
+     /** {@code errorCode} matches {@code UhfTransportException}'s stable error codes. */
+     void onError(int errorCode);
+diff --git a/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl b/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl
+new file mode 100644
+index 0000000..d96b363
+--- /dev/null
++++ b/aidl/rockchip/uhf/aidl/UhfRawTagRecord.aidl
+@@ -0,0 +1,31 @@
++/*
++ * Copyright (C) 2026 The Android Open Source Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package rockchip.uhf.aidl;
++
++/**
++ * One raw, still-undecoded tag-record payload (post status-byte-stripping) from
++ * {@link IUhfReaderCallback#onTagBatch}. A one-field wrapper around {@code byte[]}: structured/
++ * stable AIDL has no variable-length-array-of-variable-length-array type (neither {@code byte[][]}
++ * nor {@code List<byte[]>} is legal — confirmed by actually running
++ * {@code m rockchip.uhf.aidl-update-api} against both), so a batch is
++ * {@code UhfRawTagRecord[]} instead: a single-dimensional array of a parcelable, which is exactly
++ * as legal as an array of any other parcelable regardless of what variable-length data the
++ * parcelable itself carries.
++ */
++parcelable UhfRawTagRecord {
++    byte[] data;
++}
+-- 
+2.34.1
+

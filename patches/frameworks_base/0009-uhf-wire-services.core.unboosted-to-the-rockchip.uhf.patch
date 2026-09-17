@@ -1,0 +1,50 @@
+From d6906b476bf5968bb69c06366dd0b8b5f0d93da8 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 10:31:26 +0200
+Subject: [PATCH 09/13] uhf: wire services.core.unboosted to the
+ rockchip.uhf.aidl Java library
+
+Real build failure, found by actually running the build (not by
+inspection):
+
+  frameworks/base/services/core/java/com/android/server/uhf/UhfHalTransport.java:25:
+  error: symbol not found rockchip.uhf.aidl.IUhfReader
+
+UhfHalTransport.java has imported rockchip.uhf.aidl.IUhfReader since the
+Phase 2 HAL-transport commit, but services/core/Android.bp's
+services.core.unboosted module was never given a static_libs dependency
+on the generated AIDL Java library, so it only ever compiled by accident
+in prior manual/partial verification passes that didn't build this
+target - the first time the real services.core.unboosted module actually
+got compiled (via make update-api's system-server-stubs dependency
+chain) this surfaced immediately.
+
+Fix: add "rockchip.uhf.aidl-java" next to this file's other AIDL/HIDL HAL
+Java libraries (android.hardware.boot-V1-java, android.hardware.health-V2-java,
+etc.) in static_libs. Confirmed the exact generated module name against
+system/tools/aidl/build/aidl_interface.go:378 ("When enabled, this
+creates a target called '<name>-java'.") rather than guessing - our
+aidl_interface has no versions_with_info (see the two prior commits in
+this series fixing that), so it's the unversioned "<name>-java" form, not
+a "-V1-java" suffix.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ services/core/Android.bp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/services/core/Android.bp b/services/core/Android.bp
+index f8d19ec9..c5cfe921 100644
+--- a/services/core/Android.bp
++++ b/services/core/Android.bp
+@@ -186,6 +186,7 @@ java_library_static {
+         "com.android.sysprop.watchdog",
+         "ImmutabilityAnnotation",
+         "securebox",
++        "rockchip.uhf.aidl-java", // AIDL, UHF-SRS-001 - see com.android.server.uhf.UhfHalTransport
+     ],
+     javac_shard_size: 50,
+     javacflags: [
+-- 
+2.34.1
+

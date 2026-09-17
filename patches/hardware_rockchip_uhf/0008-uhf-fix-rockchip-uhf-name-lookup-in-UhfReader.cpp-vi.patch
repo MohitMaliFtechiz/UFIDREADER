@@ -1,0 +1,128 @@
+From 032d7891ffd4629517ea71e53ea5224c5351e125 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 11:05:24 +0200
+Subject: [PATCH 08/10] uhf: fix rockchip::uhf:: name lookup in UhfReader.cpp
+ via explicit using-declarations
+
+Real C++ compile error, found by actually building the HAL for the first
+time in this series (everything up to this point had only exercised the
+Java/AIDL layers):
+
+  UhfReader.cpp:133:34: error: no member named 'buildFrame' in namespace
+  'aidl::rockchip::uhf'; did you mean '::rockchip::uhf::buildFrame'?
+  (and the same for kAddressBroadcast, scanWithStallRecovery,
+  ScanOutcome, reCmdMatches)
+
+UhfReader.cpp lives inside `namespace aidl { namespace rockchip { namespace
+uhf { namespace aidl { namespace impl {`, generated to match the AIDL
+package rockchip.uhf.aidl. Every unqualified `rockchip::uhf::X` call in
+that file was resolving to the empty AIDL-generated `aidl::rockchip::uhf`
+namespace (which happens to share the same rockchip/uhf name segments)
+rather than the top-level `::rockchip::uhf` namespace UhfWireProtocol.h
+actually declares buildFrame/kAddressBroadcast/scanWithStallRecovery/
+ScanOutcome/reCmdMatches in. The compiler's own suggestion pointed
+straight at the fix.
+
+Added explicit `using ::rockchip::uhf::X;` declarations (global-qualified
+with a leading ::) right after the namespace opens, and dropped the now-
+redundant rockchip::uhf:: prefix at every call site, so this doesn't
+silently reintroduce the ambiguity if either namespace grows more
+same-named symbols later.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/UhfReader.cpp | 35 +++++++++++++++++++++++------------
+ 1 file changed, 23 insertions(+), 12 deletions(-)
+
+diff --git a/aidl/default/UhfReader.cpp b/aidl/default/UhfReader.cpp
+index 41a9ee2..5d96f2b 100644
+--- a/aidl/default/UhfReader.cpp
++++ b/aidl/default/UhfReader.cpp
+@@ -33,6 +33,18 @@ namespace uhf {
+ namespace aidl {
+ namespace impl {
+ 
++// Explicitly global-qualified: this file sits inside aidl::rockchip::uhf::aidl::impl, and an
++// unqualified rockchip::uhf::X here resolves to the AIDL-generated aidl::rockchip::uhf namespace
++// (which shares the rockchip/uhf name segments) rather than the top-level ::rockchip::uhf
++// namespace UhfWireProtocol.h actually declares these in - a real build failure, found by
++// actually compiling this file for the first time, with the compiler's own "did you mean
++// '::rockchip::uhf::buildFrame'?" pointing straight at the fix.
++using ::rockchip::uhf::buildFrame;
++using ::rockchip::uhf::kAddressBroadcast;
++using ::rockchip::uhf::reCmdMatches;
++using ::rockchip::uhf::ScanOutcome;
++using ::rockchip::uhf::scanWithStallRecovery;
++
+ namespace {
+ // Mirrors com.android.server.uhf.UhfProtocol.ERROR_* exactly (§5.5). See UhfHalTransport.java on
+ // the Java side for the other half of this contract.
+@@ -130,8 +142,7 @@ UhfReader::~UhfReader() {
+ 
+ ::ndk::ScopedAStatus UhfReader::transact(int32_t command, const std::vector<uint8_t>& payload,
+                                           int32_t timeoutMs, std::vector<uint8_t>* _aidl_return) {
+-    std::vector<uint8_t> frame = rockchip::uhf::buildFrame(rockchip::uhf::kAddressBroadcast,
+-                                                            command, payload);
++    std::vector<uint8_t> frame = buildFrame(kAddressBroadcast, command, payload);
+     ::ndk::ScopedAStatus lastFailure = ::ndk::ScopedAStatus::ok();
+     for (int attempt = 0; attempt <= kMaxTransactRetries; attempt++) {
+         std::lock_guard<std::mutex> lock(mIoLock);
+@@ -164,16 +175,16 @@ UhfReader::~UhfReader() {
+             size_t offset = 0;
+             bool gotReply = false;
+             while (offset < len) {
+-                auto r = rockchip::uhf::scanWithStallRecovery(buf + offset, len - offset, stale);
+-                if (r.outcome == rockchip::uhf::ScanOutcome::kNeedMoreData) {
++                auto r = scanWithStallRecovery(buf + offset, len - offset, stale);
++                if (r.outcome == ScanOutcome::kNeedMoreData) {
+                     break;
+                 }
+-                if (r.outcome == rockchip::uhf::ScanOutcome::kResync) {
++                if (r.outcome == ScanOutcome::kResync) {
+                     offset += r.bytesToDiscard;
+                     continue;
+                 }
+                 offset += r.frame.wireLength;
+-                if (!rockchip::uhf::reCmdMatches(r.frame, command)) {
++                if (!reCmdMatches(r.frame, command)) {
+                     continue; // FR-LNK-06: e.g. an interleaved 0xEE real-time tag frame
+                 }
+                 int status = !r.frame.data.empty() ? r.frame.data[0] : 0x01;
+@@ -209,7 +220,7 @@ UhfReader::~UhfReader() {
+     if (mStreaming.load()) {
+         return ::ndk::ScopedAStatus::ok();
+     }
+-    std::vector<uint8_t> enter = rockchip::uhf::buildFrame(rockchip::uhf::kAddressBroadcast, 0x76,
++    std::vector<uint8_t> enter = buildFrame(kAddressBroadcast, 0x76,
+                                                             {0x01});
+     ::write(mFd, enter.data(), enter.size());
+     mStreaming.store(true);
+@@ -227,8 +238,8 @@ UhfReader::~UhfReader() {
+     {
+         std::lock_guard<std::mutex> lock(mIoLock);
+         if (mFd >= 0) {
+-            std::vector<uint8_t> stop = rockchip::uhf::buildFrame(
+-                    rockchip::uhf::kAddressBroadcast, 0x76, {0x00});
++            std::vector<uint8_t> stop = buildFrame(
++                    kAddressBroadcast, 0x76, {0x00});
+             ::write(mFd, stop.data(), stop.size());
+         }
+     }
+@@ -266,11 +277,11 @@ void UhfReader::pumpLoop(std::shared_ptr<IUhfReaderCallback> callback) {
+         std::vector<UhfRawTagRecord> batch;
+         size_t offset = 0;
+         while (offset < len) {
+-            auto r = rockchip::uhf::scanWithStallRecovery(buf + offset, len - offset, stale);
+-            if (r.outcome == rockchip::uhf::ScanOutcome::kNeedMoreData) {
++            auto r = scanWithStallRecovery(buf + offset, len - offset, stale);
++            if (r.outcome == ScanOutcome::kNeedMoreData) {
+                 break;
+             }
+-            if (r.outcome == rockchip::uhf::ScanOutcome::kResync) {
++            if (r.outcome == ScanOutcome::kResync) {
+                 offset += r.bytesToDiscard;
+                 continue;
+             }
+-- 
+2.34.1
+

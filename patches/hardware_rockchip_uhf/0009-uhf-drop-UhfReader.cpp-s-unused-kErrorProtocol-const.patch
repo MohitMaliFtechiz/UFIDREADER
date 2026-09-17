@@ -1,0 +1,51 @@
+From 971014a0f99bdad73aeea014875fba81102f476f Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 11:10:19 +0200
+Subject: [PATCH 09/10] uhf: drop UhfReader.cpp's unused kErrorProtocol
+ constant
+
+Real compile error, found by actually compiling this file (the previous
+commit fixed a namespace-lookup error that had been masking everything
+past it in this function):
+
+  UhfReader.cpp:51:19: error: unused variable 'kErrorProtocol'
+  [-Werror,-Wunused-const-variable]
+
+kErrorTimeout and kErrorDeviceLost are both genuinely used - they cover
+the two link-layer conditions this class observes directly (a transact()
+timeout, a device-lost failure to open/read/write the tty). kErrorProtocol
+was never wired to anything, and shouldn't be: interpreting a reader's
+in-band status byte as a protocol violation is protocol semantics, which
+this class's own doc comment says explicitly belongs to
+com.android.server.uhf.UhfProtocol.java on the Java side of this Binder
+boundary, not this "thin" HAL layer that just forwards raw reply bytes.
+Removed the dead constant rather than inventing a call site for it.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/UhfReader.cpp | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/aidl/default/UhfReader.cpp b/aidl/default/UhfReader.cpp
+index 5d96f2b..c0509db 100644
+--- a/aidl/default/UhfReader.cpp
++++ b/aidl/default/UhfReader.cpp
+@@ -46,9 +46,12 @@ using ::rockchip::uhf::ScanOutcome;
+ using ::rockchip::uhf::scanWithStallRecovery;
+ 
+ namespace {
+-// Mirrors com.android.server.uhf.UhfProtocol.ERROR_* exactly (§5.5). See UhfHalTransport.java on
+-// the Java side for the other half of this contract.
+-constexpr int32_t kErrorProtocol = 4;
++// Mirrors the two com.android.server.uhf.UhfProtocol.ERROR_* codes this link-layer boundary
++// actually observes itself (§5.5); status-byte-to-error semantics for everything else, including
++// ERROR_PROTOCOL, are UhfProtocol.java's job on the Java side, per this class's own doc comment -
++// this HAL layer owns framing/CRC/timing and forwards raw reply bytes, not protocol semantics. A
++// build with -Werror,-Wunused-const-variable is what caught ERROR_PROTOCOL's mirror having no real
++// use at this layer, once this file was compiled for the first time in this series.
+ constexpr int32_t kErrorTimeout = 6;
+ constexpr int32_t kErrorDeviceLost = 7;
+ 
+-- 
+2.34.1
+

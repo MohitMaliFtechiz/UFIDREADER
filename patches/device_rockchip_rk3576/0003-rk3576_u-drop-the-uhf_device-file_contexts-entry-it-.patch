@@ -1,0 +1,59 @@
+From d2a6cf66378f694e4c243cfa77d6b200b4e4c009 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 11:20:23 +0200
+Subject: [PATCH 3/3] rk3576_u: drop the uhf_device file_contexts entry - it
+ collides with the platform's own usb_serial_device label
+
+Real build failure, found by actually running the build (not by
+inspection):
+
+  file_contexts.concat.tmp: Multiple different specifications for
+  /dev/ttyUSB[0-9]*  (u:object_r:uhf_device:s0 and
+  u:object_r:usb_serial_device:s0).
+  Error: could not load context file from file_contexts.concat.tmp
+
+system/sepolicy/private/file_contexts has labeled /dev/ttyUSB[0-9]*
+usb_serial_device platform-wide since sepolicy API 30 - this file's own
+device-specific uhf_device override for the exact same pattern is a hard
+conflict, not a precedence question; sefcontext_compile refuses to guess
+which one wins.
+
+Removed the override. The companion commit in hardware/rockchip/uhf
+(hal_uhf.te) grants hal_uhf_default access to the platform's own
+usb_serial_device type directly instead of a bespoke uhf_device one, so
+NFR-S-01 (only the HAL domain touches the reader's device node) still
+holds - confirmed no other domain on this product is granted
+usb_serial_device access. The OI-05 TODO about narrowing past every
+ttyUSB* once the reader's real VID/PID is confirmed is unchanged by this
+- it was already the same "every ttyUSB* on the board" approximation
+either way.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ rk3576_u/sepolicy/file_contexts | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/rk3576_u/sepolicy/file_contexts b/rk3576_u/sepolicy/file_contexts
+index 10866e3..4b1e718 100644
+--- a/rk3576_u/sepolicy/file_contexts
++++ b/rk3576_u/sepolicy/file_contexts
+@@ -1,7 +1,12 @@
+ # UHF-SRS-001 NFR-S-01. Board-specific: this reader enumerates as /dev/ttyUSB0 on rk3576_u.
+-# uhf_device is declared once, board-independently, in
+-# hardware/rockchip/uhf/aidl/default/sepolicy/hal_uhf.te.
++#
++# No file_contexts entry here (deliberately, not an oversight): system/sepolicy/private/
++# file_contexts already labels /dev/ttyUSB[0-9]* usb_serial_device platform-wide, and
++# sefcontext_compile rejects a second, different label for the same exact pattern - confirmed by
++# actually hitting that build error with an earlier uhf_device override this file used to carry.
++# hal_uhf.te (hardware/rockchip/uhf/aidl/default/sepolicy) grants hal_uhf_default access to
++# usb_serial_device directly instead.
+ #
+ # TODO(OI-05): narrow past every ttyUSB* once R1 confirms this reader's USB vendor/product ID —
+-# mirrors the same open item on this product's ueventd.uhf.rc DAC rule.
+-/dev/ttyUSB[0-9]*   u:object_r:uhf_device:s0
++# mirrors the same open item on this product's ueventd.uhf.rc DAC rule. When that lands, it'll
++# need a real per-path or by-id label distinct from usb_serial_device, added back here.
+-- 
+2.34.1
+
