@@ -15,7 +15,7 @@ patch's own header.
 
 | Phase | Scope | Status |
 |---|---|---|
-| **1 — Vertical slice** | Session lifecycle, reader identity, region, RF power, antennas, polled inventory, streaming (SRS §4.1-4.8) | Done. Wire-protocol codec and session-arbitration policy are unit-tested (92 host-side JUnit tests, no hardware required); the AIDL/Binder/JNI layers are written but unbuilt (no framework build attempted, no reader hardware available in the environment this was built in). |
+| **1 — Vertical slice** | Session lifecycle, reader identity, region, RF power, antennas, polled/buffered inventory, streaming (SRS §4.1-4.9) | Done, including buffered inventory (§4.9), completed after the arbiter-level plumbing for it sat unreachable through one prior patch. Wire-protocol codec and session-arbitration policy are unit-tested (100 host-side JUnit tests, no hardware required); the AIDL/Binder/JNI layers are written but unbuilt (no framework build attempted, no reader hardware available in the environment this was built in). |
 | **2 — HAL split** | Vendor AIDL HAL (`rockchip.uhf.aidl`), native default implementation, sepolicy, VINTF | Done. The Phase 1 JNI shortcut is removed per the SRS's own exit criterion. Unbuilt/unverified for the same reasons as Phase 1. |
 | **3 — Tag operations** | Tag memory read/write, EPC rewrite, block write/erase, kill, lock, passwords (SRS §4.10-4.11) | Done for memory access and security. Read protection, EAS, and vendor extensions (§4.12-4.14) are **not implemented** — their wire payloads are unspecified beyond a command byte in the vendor manual, and guessing them wholesale seemed worse than leaving them open. |
 | **4 — SDK** | AAR, stub JAR, Kotlin adapters, sample app | Not started. |
@@ -28,7 +28,7 @@ are confirmed against hardware versus inferred and pending confirmation.
 
 ```
 patches/
-  frameworks_base/            4 patches — framework API, system service, session arbiter, protocol codec
+  frameworks_base/            5 patches — framework API, system service, session arbiter, protocol codec
   hardware_rockchip_uhf/      1 patch   — the vendor AIDL HAL (new project)
   device_rockchip_rk3576/     2 patches — board wiring, ueventd, sepolicy, HAL packaging
   device_rockchip_common/     1 patch   — the one shared-file change, a single precedented import line
@@ -53,7 +53,7 @@ directory at that path (`mkdir -p hardware/rockchip/uhf && cd $_ && git init && 
 `device/rockchip/rk3576/rk3576_u`'s patch already demonstrates
 (`$(call inherit-product, hardware/rockchip/uhf/uhf_hal.mk)`).
 
-Apply in the order listed above — `frameworks/base`'s 4 patches are sequential (each depends on
+Apply in the order listed above — `frameworks/base`'s 5 patches are sequential (each depends on
 the previous), and the `device/rockchip/rk3576` and `hardware/rockchip/uhf` patches assume the
 `frameworks/base` API surface already exists.
 
@@ -66,7 +66,7 @@ Verified / Documented / Confirm convention the SRS itself uses for wire protocol
   and the session-arbitration policy (exclusivity, the antenna-check interlock, the RF power
   ceiling, region persistence, the streaming/buffered/tag-op mutual-exclusion rules) — both are
   plain Java with no Android framework dependency, compiled and tested standalone against JUnit 4
-  on a host JDK. 92 tests, all passing as of the last patch in this series.
+  on a host JDK. 100 tests, all passing as of the last patch in this series.
 - **Written, not verified**: everything that needs a full AOSP framework build or native
   toolchain to compile (the AIDL surface, `UhfService`, the HAL's C++ implementation, sepolicy) —
   no such build was attempted against this tree, and no reader hardware was available to exercise

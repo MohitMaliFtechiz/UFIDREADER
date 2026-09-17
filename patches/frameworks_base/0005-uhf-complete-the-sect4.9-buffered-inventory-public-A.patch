@@ -1,0 +1,495 @@
+From bae9d565c7d6ec662893832b4a016813434ab8e2 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Thu, 17 Sep 2026 08:04:56 +0200
+Subject: [PATCH 5/5] uhf: complete the sect4.9 buffered inventory public API
+ (FR-BUF-01..04)
+
+Closes a real gap from the Phase 1 commit: UhfSessionArbiter already had
+startBufferedInventory/stopBufferedInventory (needed internally for the
+FR-STR-13 stream-suspend bookkeeping), but nothing above it - not the
+AIDL, not UhfSession, not UhfService - ever exposed buffered inventory to
+a caller. An app had no way to reach a feature the arbiter was already
+half-built to support.
+
+Adds, end to end (AIDL -> UhfSession -> UhfService -> UhfSessionArbiter):
+- startBufferedInventory(InventoryParams) - now takes Q/session, sent in
+  the 0x18 payload (previously hardcoded to an empty payload).
+- getBufferedTagCount() (0x19) and readBuffer() (0x72, reusing the same
+  multi-frame assembly and status handling inventory() already uses -
+  FR-BUF-03 says explicitly to handle it "as in FR-INV-02", so this reuses
+  that path instead of writing a second copy of it).
+- clearBuffer() - FR-BUF-04s explicit mid-session half, distinct from
+  stopBufferedInventory()s automatic on-session-end half (both send the
+  same 0x1A; the difference is only whether the buffered session ends).
+- stopBufferedInventory() on the public API - not shown in the SRS's own
+  sect4.9 code sample, but added anyway: without it there is no
+  caller-reachable way to end buffered mode and get an interrupted stream
+  back (FR-STR-13s restart half is otherwise unreachable).
+
+All four are UHF_READ-gated (sect2.3 groups buffered inventory with polled/
+streaming inventory as ordinary tag acquisition, not OEM configuration)
+and all route through the same FR-STR-13 stop/apply/restart discipline
+tag memory ops already use.
+
+8 new arbiter tests (Q/session payload, count decode incl. a too-short-
+reply rejection, buffer read success/empty/error paths reusing the tested
+decoder, explicit-clear vs automatic-clear-on-stop). 100/100 total passing.
+
+Cross-checked by script again: AIDL (37 methods) <-> BinderService <->
+UhfManager/UhfSession <-> UhfSessionArbiter all match 1:1, no mismatches
+this round.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../android/hardware/uhf/IUhfService.aidl     |  19 +++
+ .../java/android/hardware/uhf/UhfSession.java |  62 ++++++++++
+ .../com/android/server/uhf/UhfService.java    |  47 +++++++-
+ .../android/server/uhf/UhfSessionArbiter.java |  71 ++++++++++-
+ .../server/uhf/UhfSessionArbiterTest.java     | 113 +++++++++++++++++-
+ 5 files changed, 301 insertions(+), 11 deletions(-)
+
+diff --git a/core/java/android/hardware/uhf/IUhfService.aidl b/core/java/android/hardware/uhf/IUhfService.aidl
+index 0424b314..3b1fb82a 100644
+--- a/core/java/android/hardware/uhf/IUhfService.aidl
++++ b/core/java/android/hardware/uhf/IUhfService.aidl
+@@ -108,6 +108,25 @@ interface IUhfService {
+ 
+     void resetStreamStats(IBinder sessionToken);
+ 
++    // ---- §4.9 Buffered inventory ----
++    // Governed by FR-STR-13/FR-BUF-07 like §4.10/4.11 below: an active stream is stopped for the
++    // duration of the whole buffered session (not just one call) and restarted when
++    // stopBufferedInventory ends it, unless the caller had already stopped it explicitly.
++
++    void startBufferedInventory(IBinder sessionToken, in InventoryParams params);
++
++    /** Ends the buffered session and clears the buffer (FR-BUF-04's automatic half); restores a
++     * stream this session interrupted, if any. Not in the SRS's own §4.9 code sample, but
++     * necessary: without it there is no caller-reachable way to end buffered mode at all. */
++    void stopBufferedInventory(IBinder sessionToken);
++
++    int getBufferedTagCount(IBinder sessionToken);
++
++    List<UhfTag> readBuffer(IBinder sessionToken);
++
++    /** FR-BUF-04's explicit, mid-session half — clears without ending the buffered session. */
++    void clearBuffer(IBinder sessionToken);
++
+     // ---- §4.10 Tag memory access, §4.11 Tag security (Phase 3) ----
+     // All of these are governed by FR-STR-13: an active stream is stopped first and restarted
+     // afterward if the caller had not explicitly stopped it, the same as §4.9's buffered
+diff --git a/core/java/android/hardware/uhf/UhfSession.java b/core/java/android/hardware/uhf/UhfSession.java
+index 06f411f0..6efa68bb 100644
+--- a/core/java/android/hardware/uhf/UhfSession.java
++++ b/core/java/android/hardware/uhf/UhfSession.java
+@@ -197,6 +197,68 @@ public final class UhfSession implements AutoCloseable {
+         }
+     }
+ 
++    // ---------------------------------------------------------------------------------------
++    // §4.9 Buffered inventory
++    // ---------------------------------------------------------------------------------------
++
++    /** FR-BUF-01. Governed by FR-STR-13 like every §4.10/§4.11 call: an active stream is stopped
++     * for the whole buffered session, not just this one call, and restarted by
++     * {@link #stopBufferedInventory} unless the caller had already stopped it explicitly. */
++    public void startBufferedInventory(@NonNull InventoryParams params) throws UhfException {
++        try {
++            mService.startBufferedInventory(mSessionToken, params);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** Ends the buffered session; FR-BUF-04 clears the buffer as part of doing so. */
++    public void stopBufferedInventory() {
++        try {
++            mService.stopBufferedInventory(mSessionToken);
++        } catch (RemoteException e) {
++            Log.w(TAG, "stopBufferedInventory: service already gone", e);
++        }
++    }
++
++    public int getBufferedTagCount() throws UhfException {
++        try {
++            return mService.getBufferedTagCount(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    @NonNull
++    public List<UhfTag> readBuffer() throws UhfException {
++        try {
++            return mService.readBuffer(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    /** FR-BUF-04's explicit, mid-session half — does not end the buffered session. */
++    public void clearBuffer() throws UhfException {
++        try {
++            mService.clearBuffer(mSessionToken);
++        } catch (ServiceSpecificException e) {
++            throw toUhfException(e);
++        } catch (RemoteException e) {
++            throw e.rethrowFromSystemServer();
++        }
++    }
++
++    // ---------------------------------------------------------------------------------------
++    // §4.8 Streaming
++    // ---------------------------------------------------------------------------------------
++
+     /** Must be called before {@link #startStreaming}; FR-STR-08 applies it the next time
+      * streaming (re)starts, not retroactively to an already-running stream. */
+     public void setStreamParams(@NonNull StreamParams params) throws UhfException {
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+index 69199d45..8508fd9b 100644
+--- a/services/core/java/com/android/server/uhf/UhfService.java
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -374,12 +374,55 @@ public final class UhfService extends SystemService {
+                     params.getAntenna(),
+                     params.getTarget(),
+                     params.getScanTimeMs()));
++            int reportedAntenna = params.hasAntennaTargetScanTime() ? params.getAntenna() : 0;
++            return toUhfTags(records, reportedAntenna);
++        }
++
++        // ---- §4.9 Buffered inventory ----
++
++        @Override
++        public void startBufferedInventory(IBinder sessionToken, InventoryParams params) {
++            enforceRead(); // §4.9 is a "tag acquisition" feature alongside inventory/streaming
++            requireOwnedSession(sessionToken);
++            runTransportVoid(() -> mArbiter.startBufferedInventory(
++                    sessionToken, params.getQValue(), params.getSession()));
++        }
++
++        @Override
++        public void stopBufferedInventory(IBinder sessionToken) {
++            requireOwnedSession(sessionToken);
++            runTransportVoid(() -> mArbiter.stopBufferedInventory(sessionToken));
++        }
++
++        @Override
++        public int getBufferedTagCount(IBinder sessionToken) {
++            enforceRead();
++            requireOwnedSession(sessionToken);
++            return runTransport(() -> mArbiter.getBufferedTagCount(sessionToken));
++        }
++
++        @Override
++        public List<UhfTag> readBuffer(IBinder sessionToken) {
++            enforceRead();
++            requireOwnedSession(sessionToken);
++            List<UhfProtocol.TagRecord> records =
++                    runTransport(() -> mArbiter.readBuffer(sessionToken));
++            return toUhfTags(records, /* antenna= */ 0); // buffered records carry no antenna field
++        }
++
++        @Override
++        public void clearBuffer(IBinder sessionToken) {
++            enforceRead();
++            requireOwnedSession(sessionToken);
++            runTransportVoid(() -> mArbiter.clearBuffer(sessionToken));
++        }
++
++        private List<UhfTag> toUhfTags(List<UhfProtocol.TagRecord> records, int antenna) {
+             List<UhfTag> tags = new ArrayList<>(records.size());
+             long now = System.nanoTime();
+-            int reportedAntenna = params.hasAntennaTargetScanTime() ? params.getAntenna() : 0;
+             for (int i = 0; i < records.size(); i++) {
+                 UhfProtocol.TagRecord r = records.get(i);
+-                tags.add(new UhfTag(r.epc, r.tid, r.rssi, reportedAntenna, now, i));
++                tags.add(new UhfTag(r.epc, r.tid, r.rssi, antenna, now, i));
+             }
+             return tags;
+         }
+diff --git a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+index 76890296..464d8c08 100644
+--- a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
++++ b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+@@ -54,8 +54,10 @@ public final class UhfSessionArbiter {
+     private static final int CMD_ANTENNA_CHECK = 0x66;
+     private static final int CMD_RF_POWER = 0x2F;
+     private static final int CMD_REGION = 0x22;
+-    private static final int CMD_BUFFERED_START = 0x18; // FR-BUF-01, status Confirm pending OI-01
+-    private static final int CMD_BUFFERED_STOP = 0x1A;  // FR-BUF-04, status Confirm pending OI-01
++    private static final int CMD_BUFFERED_START = 0x18; // FR-BUF-01, status Confirm pending OI-02
++    private static final int CMD_BUFFER_COUNT = 0x19;   // FR-BUF-02, status Confirm pending OI-02
++    private static final int CMD_BUFFER_READ = 0x72;    // FR-BUF-03, status Confirm pending OI-02
++    private static final int CMD_BUFFER_CLEAR = 0x1A;   // FR-BUF-04, status Confirm pending OI-02
+ 
+     // §4.10/§4.11 (Phase 3). All Confirm status pending OI-01 — see buildTagOpPayload's doc.
+     private static final int CMD_READ_MEMORY = 0x02;
+@@ -224,7 +226,7 @@ public final class UhfSessionArbiter {
+             if (mode == ReaderMode.STREAMING) {
+                 transport.stopStream();
+             } else if (mode == ReaderMode.BUFFERED) {
+-                transport.transact(CMD_BUFFERED_STOP, new byte[0], DEFAULT_TIMEOUT_MS);
++                transport.transact(CMD_BUFFER_CLEAR, new byte[0], DEFAULT_TIMEOUT_MS);
+             }
+         } catch (UhfTransportException e) {
+             // Best-effort: releasing a session (especially on client death) must not throw. The
+@@ -445,7 +447,7 @@ public final class UhfSessionArbiter {
+     private StreamRequest suspendedStreamRequest;
+     private UhfTransport.StreamCallback suspendedStreamCallback;
+ 
+-    public synchronized void startBufferedInventory(Object clientToken)
++    public synchronized void startBufferedInventory(Object clientToken, int qValue, int session)
+             throws UhfTransportException {
+         requireHolder(clientToken);
+         if (mode == ReaderMode.STREAMING) {
+@@ -454,17 +456,23 @@ public final class UhfSessionArbiter {
+             suspendedStreamRequest = lastStreamRequest;
+             suspendedStreamCallback = activeStreamCallback;
+         }
+-        transport.transact(CMD_BUFFERED_START, new byte[0], DEFAULT_TIMEOUT_MS);
++        transport.transact(CMD_BUFFERED_START, new byte[] {(byte) qValue, (byte) session},
++                DEFAULT_TIMEOUT_MS);
+         mode = ReaderMode.BUFFERED;
+     }
+ 
++    /**
++     * FR-BUF-04: the buffer is cleared automatically as part of ending the buffered session —
++     * this is the "session end" half of that requirement. {@link #clearBuffer} is the other half,
++     * an explicit mid-session clear the caller can request without ending the session.
++     */
+     public synchronized void stopBufferedInventory(Object clientToken)
+             throws UhfTransportException {
+         requireHolder(clientToken);
+         if (mode != ReaderMode.BUFFERED) {
+             return;
+         }
+-        transport.transact(CMD_BUFFERED_STOP, new byte[0], DEFAULT_TIMEOUT_MS);
++        transport.transact(CMD_BUFFER_CLEAR, new byte[0], DEFAULT_TIMEOUT_MS);
+         mode = ReaderMode.IDLE;
+         if (streamSuspendedForBuffered) {
+             streamSuspendedForBuffered = false;
+@@ -475,6 +483,57 @@ public final class UhfSessionArbiter {
+         }
+     }
+ 
++    /** FR-BUF-02. Confirm status pending OI-02: this assumes a status byte followed by a 2-byte
++     * big-endian count, the same general shape as every other status-prefixed reply in this
++     * protocol family; isolated here so a real capture only requires changing this one method. */
++    public synchronized int getBufferedTagCount(Object clientToken) throws UhfTransportException {
++        requireHolder(clientToken);
++        byte[] reply = transport.transact(CMD_BUFFER_COUNT, new byte[0], DEFAULT_TIMEOUT_MS);
++        if (reply.length < 3) {
++            throw new UhfTransportException(UhfProtocol.ERROR_PROTOCOL,
++                    "buffer count reply too short: " + reply.length + " bytes");
++        }
++        int status = reply[0] & 0xFF;
++        int error = UhfProtocol.mapStatusToError(status);
++        if (error != UhfProtocol.ERROR_NONE) {
++            throw new UhfTransportException(error, "buffer count status 0x"
++                    + Integer.toHexString(status));
++        }
++        return ((reply[1] & 0xFF) << 8) | (reply[2] & 0xFF);
++    }
++
++    /** FR-BUF-03: multi-frame replies are handled the same way FR-INV-02 handles them for polled
++     * inventory — {@link UhfTransport}'s contract already assembles a 0x03 chain before returning,
++     * so this reuses {@link #inventory}'s single-frame decode path rather than a second copy of
++     * the same logic. */
++    public synchronized List<UhfProtocol.TagRecord> readBuffer(Object clientToken)
++            throws UhfTransportException {
++        requireHolder(clientToken);
++        byte[] reply = transport.transact(CMD_BUFFER_READ, new byte[0], DEFAULT_TIMEOUT_MS);
++        int status = reply.length > 0 ? (reply[0] & 0xFF) : UhfProtocol.STATUS_NO_OPERABLE_TAGS;
++        int error = UhfProtocol.mapStatusToError(status);
++        if (error != UhfProtocol.ERROR_NONE) {
++            throw new UhfTransportException(error, "buffer read status 0x"
++                    + Integer.toHexString(status));
++        }
++        if (status == UhfProtocol.STATUS_NO_OPERABLE_TAGS) {
++            return new ArrayList<>(); // FR-INV-08's "empty, not an error" applies here too
++        }
++        List<UhfProtocol.Frame> chain = new ArrayList<>();
++        chain.add(new UhfProtocol.Frame(
++                UhfProtocol.ADDRESS_BROADCAST, CMD_BUFFER_READ, reply, reply.length + 5));
++        return UhfProtocol.assembleAndDecodeInventory(chain);
++    }
++
++    /** FR-BUF-04's explicit, mid-session half — see {@link #stopBufferedInventory}'s doc for the
++     * automatic-on-session-end half. Valid regardless of current mode: clearing a buffer that
++     * happens to be empty, or clearing outside a buffered session, is a harmless no-op on the
++     * wire, not an error worth distinguishing here. */
++    public synchronized void clearBuffer(Object clientToken) throws UhfTransportException {
++        requireHolder(clientToken);
++        transport.transact(CMD_BUFFER_CLEAR, new byte[0], DEFAULT_TIMEOUT_MS);
++    }
++
+     // ---------------------------------------------------------------------------------------
+     // §4.10 Tag memory access (Phase 3)
+     // ---------------------------------------------------------------------------------------
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+index bab20fc8..82948923 100644
+--- a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+@@ -524,7 +524,7 @@ public class UhfSessionArbiterTest {
+         arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
+         transport.reset();
+ 
+-        arbiter.startBufferedInventory(client);
++        arbiter.startBufferedInventory(client, 4, 0);
+ 
+         assertEquals(List.of("stopStream", "transact(0x18)"), transport.calls);
+         assertFalse("must not run streaming and buffered concurrently", arbiter.isStreaming(client));
+@@ -535,7 +535,7 @@ public class UhfSessionArbiterTest {
+         Object client = new Object();
+         arbiter.openSession(client);
+         arbiter.startStreaming(client, new StreamRequest(4, 0), noopCallback());
+-        arbiter.startBufferedInventory(client);
++        arbiter.startBufferedInventory(client, 4, 0);
+         transport.reset();
+ 
+         arbiter.stopBufferedInventory(client);
+@@ -550,13 +550,116 @@ public class UhfSessionArbiterTest {
+         arbiter.openSession(client);
+         transport.reset();
+ 
+-        arbiter.startBufferedInventory(client);
++        arbiter.startBufferedInventory(client, 4, 0);
+         arbiter.stopBufferedInventory(client);
+ 
+         assertFalse("nothing to restart if nothing was interrupted",
+                 transport.calls.contains("startStream"));
+     }
+ 
++    @Test
++    public void startBufferedInventory_sendsQAndSessionInThePayload() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++
++        arbiter.startBufferedInventory(client, 6, 2);
++
++        assertArrayEquals(new byte[] {6, 2}, transport.lastBufferedStartPayload);
++    }
++
++    @Test
++    public void getBufferedTagCount_decodesTheTwoByteCountAfterTheStatusByte() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x19, new byte[] {0x00, 0x01, 0x2C}); // status 0, count 300
++
++        int count = arbiter.getBufferedTagCount(client);
++
++        assertEquals(300, count);
++    }
++
++    @Test
++    public void getBufferedTagCount_shortReplyThrowsProtocolError() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x19, new byte[] {0x00});
++
++        try {
++            arbiter.getBufferedTagCount(client);
++            fail("expected rejection of a too-short reply");
++        } catch (UhfTransportException e) {
++            assertEquals(UhfProtocol.ERROR_PROTOCOL, e.getErrorCode());
++        }
++    }
++
++    @Test
++    public void readBuffer_noTagsReturnsEmptyListNotAnException() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x72, new byte[] {(byte) UhfProtocol.STATUS_NO_OPERABLE_TAGS});
++
++        assertTrue(arbiter.readBuffer(client).isEmpty());
++    }
++
++    @Test
++    public void readBuffer_decodesTagsOnSuccess() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        byte[] tagBlob = {0x01, 0x11, 0x22, (byte) 77}; // 1-word EPC + RSSI
++        byte[] reply = new byte[1 + tagBlob.length];
++        reply[0] = (byte) UhfProtocol.STATUS_INVENTORY_COMPLETE;
++        System.arraycopy(tagBlob, 0, reply, 1, tagBlob.length);
++        transport.cannedReplies.put(0x72, reply);
++
++        List<UhfProtocol.TagRecord> got = arbiter.readBuffer(client);
++
++        assertEquals(1, got.size());
++        assertArrayEquals(new byte[] {0x11, 0x22}, got.get(0).epc);
++        assertEquals(77, got.get(0).rssi);
++    }
++
++    @Test
++    public void readBuffer_errorStatusThrowsWithMappedCode() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        transport.cannedReplies.put(0x72, new byte[] {(byte) UhfProtocol.STATUS_COMMAND_EXECUTION_ERROR});
++
++        try {
++            arbiter.readBuffer(client);
++            fail("expected UhfTransportException");
++        } catch (UhfTransportException e) {
++            assertEquals(UhfProtocol.ERROR_COMMAND_REJECTED, e.getErrorCode());
++        }
++    }
++
++    @Test
++    public void clearBuffer_sendsTheClearCommandWithoutEndingTheSession() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startBufferedInventory(client, 4, 0);
++        transport.reset();
++
++        arbiter.clearBuffer(client);
++
++        assertEquals(List.of("transact(0x1a)"), transport.calls);
++        // Still in a buffered session afterward: a second explicit clear is not an error.
++        arbiter.clearBuffer(client);
++    }
++
++    @Test
++    public void stopBufferedInventory_alsoClearsTheBufferAutomatically() throws Exception {
++        Object client = new Object();
++        arbiter.openSession(client);
++        arbiter.startBufferedInventory(client, 4, 0);
++        transport.reset();
++
++        arbiter.stopBufferedInventory(client);
++
++        assertTrue("FR-BUF-04: clearing on session end is automatic, not something the caller "
++                        + "must remember to do separately",
++                transport.calls.contains("transact(0x1a)"));
++    }
++
+     // ---------------------------------------------------------------------------------------
+     // §4.10 Tag memory access (Phase 3)
+     // ---------------------------------------------------------------------------------------
+@@ -834,6 +937,7 @@ public class UhfSessionArbiterTest {
+         boolean failNextStartStream;
+         final java.util.Map<Integer, byte[]> cannedReplies = new java.util.HashMap<>();
+         byte[] lastInventoryPayload;
++        byte[] lastBufferedStartPayload;
+ 
+         /**
+          * Clears recorded call history between the "setup" portion of a test and the sequence
+@@ -871,6 +975,9 @@ public class UhfSessionArbiterTest {
+             if (command == 0x01) {
+                 lastInventoryPayload = payload;
+             }
++            if (command == 0x18) {
++                lastBufferedStartPayload = payload;
++            }
+             byte[] canned = cannedReplies.get(command);
+             return canned != null ? canned : new byte[0];
+         }
+-- 
+2.34.1
+
