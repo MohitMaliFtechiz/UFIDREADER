@@ -1,0 +1,82 @@
+From b8856f9e657fba3d58b2d030c3712699e0bdb2a7 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 14:49:48 +0200
+Subject: [PATCH 15/17] uhf: implement dumpsys uhf, currently a silent no-op
+
+Real gap against the acceptance test's own verify step:
+`adb shell dumpsys uhf` was expected to show the service's dump, not
+nothing - but IUhfService.Stub (extends android.os.Binder) was never
+given a dump() override, so it fell through to Binder's own default,
+which does essentially nothing.
+
+Reports only what isReaderAvailable()/getReaders() already expose
+without holding a session: transport-open state, the reader connection
+status, the configured ro.vendor.uhf.device value (with its HAL-side
+default), and the open session count. Deliberately does not call
+UhfSessionArbiter#getReaderInfo() or anything else gated by its
+requireHolder() check - a dump must never contend with or disturb
+whatever session an app currently holds.
+
+Follows the real DumpUtils.checkDumpPermission(...) + protected void
+dump(FileDescriptor, PrintWriter, String[]) pattern already used by
+ThermalManagerService in this same services/core tree.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../com/android/server/uhf/UhfService.java    | 29 +++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+index f1159b8d..23a90fc9 100644
+--- a/services/core/java/com/android/server/uhf/UhfService.java
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -33,10 +33,14 @@ import android.os.Binder;
+ import android.os.IBinder;
+ import android.os.RemoteException;
+ import android.os.ServiceSpecificException;
++import android.os.SystemProperties;
+ import android.util.Slog;
+ 
++import com.android.internal.util.DumpUtils;
+ import com.android.server.SystemService;
+ 
++import java.io.FileDescriptor;
++import java.io.PrintWriter;
+ import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.HashSet;
+@@ -645,6 +649,31 @@ public final class UhfService extends SystemService {
+             }
+             return state;
+         }
++
++        /**
++         * `adb shell dumpsys uhf`. Deliberately reports only what {@link #isReaderAvailable} and
++         * {@link #getReaders} already expose without needing to hold a session — see
++         * {@code UhfSessionArbiter#getReaderInfo}'s {@code requireHolder} check, which this must
++         * not trigger, since a dump should never contend with or disturb whatever session an app
++         * currently holds.
++         */
++        @Override
++        protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
++            if (!DumpUtils.checkDumpPermission(getContext(), TAG, pw)) {
++                return;
++            }
++            boolean transportOpen = mArbiter.isTransportOpen();
++            pw.println("UhfService:");
++            pw.println("  transport open (reader responded to startup reset): " + transportOpen);
++            // Kept in sync by hand with hardware/rockchip/uhf/aidl/default/UhfReader.cpp's
++            // kDevicePathProperty — system_server has no other way to know which node the HAL
++            // opened, short of adding AIDL surface purely for this diagnostic, which isn't worth
++            // it for a value already visible via getprop.
++            pw.println("  configured device (ro.vendor.uhf.device, HAL default /dev/ttyUSB0): "
++                    + SystemProperties.get("ro.vendor.uhf.device", "/dev/ttyUSB0"));
++            pw.println("  reader connected: " + (transportOpen ? "yes" : "no"));
++            pw.println("  open sessions: " + mSessions.size());
++        }
+     }
+ 
+     /** Runs a transport-touching call, mapping {@link UhfTransportException} once, centrally. */
+-- 
+2.34.1
+

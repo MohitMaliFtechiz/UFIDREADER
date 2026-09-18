@@ -1,0 +1,85 @@
+From 7a51b943d14822f4d951ffa2517f9a7f320514cf Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 14:46:38 +0200
+Subject: [PATCH 4/4] rk3576_u: set ro.vendor.uhf.device=/dev/ttyDC3, this
+ board's confirmed reader wiring
+
+Companion to hardware/rockchip/uhf's commit making UhfReader::open()
+read the device path from this property instead of a hardcoded
+/dev/ttyUSB0. On the actual board under test, the reader is wired to the
+native TTL UART (SoC UART5, pin mux uart5m1), which this vendor build's
+kernel/ueventd exposes as /dev/ttyDC3 - confirmed independently against
+real hardware (14 tags, ~120 reads/sec over that exact node at 115200).
+
+sepolicy/file_contexts: labels /dev/ttyDC3 uhf_device (an exact literal
+path, not a wildcard - there is no ttyUSB[0-9]*-style platform-wide
+collision risk here since ttyDC* is this vendor's own renamed-ttyS*
+naming scheme, unclaimed anywhere else in this tree's sepolicy). The
+existing "no entry for ttyUSB[0-9]*" comment and its usb_serial_device
+rationale are kept as-is for anyone who deploys this same board with the
+reader on a USB adapter instead.
+
+No property_contexts change needed: system/sepolicy/private/
+property_contexts already maps the ro.vendor. prefix to
+vendor_default_prop generically, which is what every other simple
+ro.vendor.* configuration property in this tree (e.g. ro.soc.manufacturer)
+relies on too.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ rk3576_u/rk3576_u.mk            |  8 ++++++++
+ rk3576_u/sepolicy/file_contexts | 23 ++++++++++++++++-------
+ 2 files changed, 24 insertions(+), 7 deletions(-)
+
+diff --git a/rk3576_u/rk3576_u.mk b/rk3576_u/rk3576_u.mk
+index aa3b73b..a1014dc 100755
+--- a/rk3576_u/rk3576_u.mk
++++ b/rk3576_u/rk3576_u.mk
+@@ -60,3 +60,11 @@ PRODUCT_PROPERTY_OVERRIDES += vendor.hwc.device.extend=HDMI-A,eDP
+ PRODUCT_COPY_FILES += \
+     device/rockchip/rk3576/rk3576_u/ueventd.uhf.rc:$(TARGET_COPY_OUT_VENDOR)/etc/ueventd.uhf.rc \
+     device/rockchip/rk3576/rk3576_u/android.hardware.uhf.xml:$(TARGET_COPY_OUT_VENDOR)/etc/permissions/android.hardware.uhf.xml
++
++## UHF-SRS-001: the confirmed reader wiring on this product's board under test is the native TTL
++## UART (SoC UART5, pin mux uart5m1), exposed by this vendor build's kernel/ueventd as /dev/ttyDC3
++## — not /dev/ttyUSB0, the HAL's own default for a USB-adapter reader. hal_uhf-service
++## (hardware/rockchip/uhf/aidl/default/UhfReader.cpp) reads this property at open() time with
++## /dev/ttyUSB0 as its fallback, so this override is the only thing that's actually board-specific;
++## the HAL binary itself needs no per-board build variant.
++PRODUCT_VENDOR_PROPERTIES += ro.vendor.uhf.device=/dev/ttyDC3
+diff --git a/rk3576_u/sepolicy/file_contexts b/rk3576_u/sepolicy/file_contexts
+index 4b1e718..094a73b 100644
+--- a/rk3576_u/sepolicy/file_contexts
++++ b/rk3576_u/sepolicy/file_contexts
+@@ -1,12 +1,21 @@
+-# UHF-SRS-001 NFR-S-01. Board-specific: this reader enumerates as /dev/ttyUSB0 on rk3576_u.
++# UHF-SRS-001 NFR-S-01. Board-specific: on the confirmed rk3576_u build under test, the reader is
++# wired to the board's native TTL UART (SoC UART5, pin mux uart5m1), which this vendor build's
++# kernel/ueventd exposes as /dev/ttyDC3, not a USB-serial adapter - see
++# hardware/rockchip/uhf/aidl/default/UhfReader.cpp's ro.vendor.uhf.device property and this
++# product's PRODUCT_VENDOR_PROPERTIES setting it to this exact path.
+ #
+-# No file_contexts entry here (deliberately, not an oversight): system/sepolicy/private/
+-# file_contexts already labels /dev/ttyUSB[0-9]* usb_serial_device platform-wide, and
++# A real, exact-path label, not a wildcard: unlike /dev/ttyUSB[0-9]*, nothing in
++# system/sepolicy/private/file_contexts claims ttyDC* (it's this vendor's own renamed-ttyS*
++# scheme), so there is no collision risk here the way there was for the USB-adapter case below.
++/dev/ttyDC3                                u:object_r:uhf_device:s0
++
++# No file_contexts entry for /dev/ttyUSB[0-9]* here (deliberately, not an oversight, kept for any
++# deployment of this board with the reader on a USB adapter instead): system/sepolicy/private/
++# file_contexts already labels that pattern usb_serial_device platform-wide, and
+ # sefcontext_compile rejects a second, different label for the same exact pattern - confirmed by
+ # actually hitting that build error with an earlier uhf_device override this file used to carry.
+ # hal_uhf.te (hardware/rockchip/uhf/aidl/default/sepolicy) grants hal_uhf_default access to
+-# usb_serial_device directly instead.
++# usb_serial_device directly instead, alongside the uhf_device grant the line above now uses.
+ #
+-# TODO(OI-05): narrow past every ttyUSB* once R1 confirms this reader's USB vendor/product ID —
+-# mirrors the same open item on this product's ueventd.uhf.rc DAC rule. When that lands, it'll
+-# need a real per-path or by-id label distinct from usb_serial_device, added back here.
++# TODO(OI-05): narrow past every ttyUSB* once confirmed this reader's USB vendor/product ID, for
++# anyone who does deploy this board with a USB-adapter reader instead of the native UART above.
+-- 
+2.34.1
+

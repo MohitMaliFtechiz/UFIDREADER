@@ -1,7 +1,7 @@
 From e49c24f50496843f78245e9d7edfb83f4a1a67da Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:16:02 +0200
-Subject: [PATCH 03/10] uhf: add owner: "rockchip" to satisfy this tree's
+Subject: [PATCH 03/15] uhf: add owner: "rockchip" to satisfy this tree's
  release-branch AIDL freeze policy
 
 Second real build failure on this module, again found by actually running

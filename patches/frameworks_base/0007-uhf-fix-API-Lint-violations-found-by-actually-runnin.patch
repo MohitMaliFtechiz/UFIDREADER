@@ -1,7 +1,7 @@
 From 1383ac0dc07c8b1740af83908593aa08daacf165 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:25:39 +0200
-Subject: [PATCH 07/13] uhf: fix API Lint violations found by actually running
+Subject: [PATCH 07/17] uhf: fix API Lint violations found by actually running
  make update-api
 
 Real metalava api-lint errors, found by running the build (not by

@@ -1,7 +1,7 @@
 From 1bdb7e7a169b1b66ea0184577ea91357dd546017 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:53:20 +0200
-Subject: [PATCH 13/13] uhf: implement getInterfaceVersion/getInterfaceHash on
+Subject: [PATCH 13/17] uhf: implement getInterfaceVersion/getInterfaceHash on
  the IUhfReaderCallback.Stub
 
 Real compile error, found by actually running the build (not by

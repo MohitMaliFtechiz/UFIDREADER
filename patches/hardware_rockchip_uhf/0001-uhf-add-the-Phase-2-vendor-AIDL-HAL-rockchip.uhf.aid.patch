@@ -1,7 +1,7 @@
 From 5aa5ccac4d42bc5ae50bc5f273eabc7f0d2df765 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Tue, 15 Sep 2026 09:45:18 +0200
-Subject: [PATCH 01/10] uhf: add the Phase 2 vendor AIDL HAL
+Subject: [PATCH 01/15] uhf: add the Phase 2 vendor AIDL HAL
  (rockchip.uhf.aidl)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -1,7 +1,7 @@
 From 3e8395f33e3329dc46e15e73575d59bb6dda31e2 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Tue, 15 Sep 2026 08:58:28 +0200
-Subject: [PATCH 01/13] uhf: add wire-protocol codec and session arbitration
+Subject: [PATCH 01/17] uhf: add wire-protocol codec and session arbitration
  core (Phase 1)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

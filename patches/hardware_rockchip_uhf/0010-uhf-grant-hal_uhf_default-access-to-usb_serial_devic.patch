@@ -1,7 +1,7 @@
 From 3fc3a1547433d61c2e53c61914ffdea1c9e39f0d Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 11:20:40 +0200
-Subject: [PATCH 10/10] uhf: grant hal_uhf_default access to usb_serial_device,
+Subject: [PATCH 10/15] uhf: grant hal_uhf_default access to usb_serial_device,
  not a bespoke uhf_device type
 
 Companion fix to device/rockchip/rk3576's file_contexts commit removing

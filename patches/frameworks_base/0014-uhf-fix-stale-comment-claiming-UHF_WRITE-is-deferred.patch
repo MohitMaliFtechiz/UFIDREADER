@@ -1,0 +1,39 @@
+From f2ce1936a355eb437124fe8754901f0b94d11fcb Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 14:46:49 +0200
+Subject: [PATCH 14/17] uhf: fix stale comment claiming UHF_WRITE is deferred
+
+Real doc bug, reported from spec review: the comment directly below
+UHF_WRITE's own <permission> declaration said UHF_WRITE was "deferred to
+the phase that implements the operations it gates" - contradicting the
+declaration sitting right above it, added when Phase 3 (tag memory/
+security) landed. Only UHF_RAW is actually still undeclared (deferred to
+Phase 5's raw passthrough); narrowed the comment to just that.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ core/res/AndroidManifest.xml | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/core/res/AndroidManifest.xml b/core/res/AndroidManifest.xml
+index d0141e6e..325f2575 100644
+--- a/core/res/AndroidManifest.xml
++++ b/core/res/AndroidManifest.xml
+@@ -2413,10 +2413,10 @@
+     <permission android:name="android.permission.UHF_CONFIGURE"
+         android:protectionLevel="signature|privileged" />
+ 
+-    <!-- UHF-SRS-001 §5.4 also defines UHF_WRITE (dangerous; tag memory writes, kill, lock) and
+-         UHF_RAW (signature; raw frame passthrough and diagnostics). Both are deferred to the
+-         phases that implement the operations they gate (§4.10-4.13 and §4.16 respectively,
+-         SRS §10.2 Phases 3 and 5) rather than declared ahead of any code that enforces them. -->
++    <!-- UHF-SRS-001 §5.4 also defines UHF_RAW (signature; raw frame passthrough and diagnostics),
++         deferred to the phase that implements the operations it gates (§4.16, SRS §10.2 Phase 5)
++         rather than declared ahead of any code that enforces it. UHF_WRITE is declared above,
++         alongside UHF_READ and UHF_CONFIGURE - Phase 3 (§4.10-4.13) implemented it. -->
+ 
+     <!-- Allows applications to receive NFC preferred payment service information.
+          <p>Protection level: normal
+-- 
+2.34.1
+

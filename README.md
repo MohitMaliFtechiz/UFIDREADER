@@ -53,14 +53,54 @@ compiler/tool output, not by inspection. In order:
 The result: a full `rockdev/Image-rk3576_u/` flashable image set builds successfully against this
 tree today, with the UHF platform compiled in and the new boot logo baked into `resource.img`.
 
+## It actually runs on real hardware now
+
+A flashed board is where the next class of bug lives — not in a compiler, but in what real
+firmware, real SELinux enforcement, and a real reader actually do. Everything below was found by
+someone actually running this on a board with a reader wired to it, not by re-reading the source:
+
+- **The platform service never published its Binder.** `Context.UHF_SERVICE = "uhf"` had been
+  registered since Phase 1, but no sepolicy anywhere in this tree had ever given the ServiceManager
+  name `uhf` its own label — it fell back to `default_android_service`, which `system_server` isn't
+  allowed to publish under. Fixing it meant clearing the same three build-time consistency checks
+  every other new service type in this tree has to pass (`sepolicy_freeze_test`,
+  `fuzzer_bindings_test`, `treble_sepolicy_tests` for five prior API levels) — see
+  `patches/system_sepolicy/`.
+- **The CRC16 polynomial was wrong.** This project's own protocol codec had flagged its CRC variant
+  as an unverified inference from the start. On real hardware it was: proven back to back on the
+  wire, the same frame with the guessed polynomial (CRC-16/MODBUS, `0xA001`) was silently ignored,
+  and with the corrected one (`0x8408`) got a full reply. One constant, in both the platform codec
+  and its HAL-side C++ port — exactly the scope that original "if it's wrong, exactly one constant
+  changes" design was meant to allow.
+- **The reader's device path was hardcoded to a USB adapter.** Fixed to a board-configurable
+  property (`ro.vendor.uhf.device`) with the hardcoded path kept only as the fallback default — see
+  "sdk/, apps/, and the AAR" above's sibling section on this in the patch notes.
+- **Reader presence was latched at boot, with no retry.** A UART reader has no hotplug event to
+  re-probe on; if it was unpowered when the platform's one boot-time connection attempt ran,
+  nothing ever tried again until a reboot. `openSession()` now retries.
+- **`dumpsys uhf` conflated "the device node opened" with "the reader replied."** Opening a UART fd
+  always succeeds the instant the device node exists, whether or not anything is attached and
+  answering — so the diagnostic meant to catch exactly this kind of failure was reporting "true"
+  while the reader had never once responded. Now tracked and reported as two separate, honestly
+  labeled states.
+
+None of this changed the shape of the public API — every fix here is policy, build configuration,
+or a wrong constant, the same discipline the acceptance criteria for this round of hardware testing
+asked for explicitly.
+
 ## Layout
 
 ```
 patches/
-  frameworks_base/            13 patches — framework API, system service, session arbiter, protocol codec, real-build fixes
-  hardware_rockchip_uhf/      10 patches — the vendor AIDL HAL (new project), plus every real-build fix on top of it
-  device_rockchip_rk3576/     3 patches  — board wiring, ueventd, sepolicy, HAL packaging, sepolicy conflict fix
+  frameworks_base/            17 patches — framework API, system service, session arbiter, protocol codec,
+                              real-build fixes, real-hardware fixes (CRC16, transport retry, dumpsys)
+  hardware_rockchip_uhf/      15 patches — the vendor AIDL HAL (new project), every real-build fix on top
+                              of it, and the matching real-hardware fixes (CRC16, device-path sepolicy)
+  device_rockchip_rk3576/     4 patches  — board wiring, ueventd, sepolicy, HAL packaging, sepolicy
+                              conflict fix, the confirmed reader's real device-path property
   device_rockchip_common/     1 patch    — the one shared-file change, a single precedented import line
+  system_sepolicy/            3 patches  — the missing "uhf" ServiceManager label a real SELinux denial
+                              on flashed hardware traced back to no sepolicy for it ever existing
   sdk/                        1 patch    — the uhf-sdk module (facade, fake reader, Kotlin adapters) + sample app
   kernel_logo/                1 patch    — ID TECH boot splash (U-Boot + kernel logo bitmaps)
 sdk/                          Plain source (not a patch) — same uhf-sdk/sample as patches/sdk, for browsing/reuse
@@ -148,6 +188,7 @@ Against a synced AOSP 14 tree with the RK3576 SDK:
 cd frameworks/base   && git am /path/to/UFIDREADER/patches/frameworks_base/*.patch
 cd device/rockchip/rk3576  && git am /path/to/UFIDREADER/patches/device_rockchip_rk3576/*.patch
 cd device/rockchip/common && git am /path/to/UFIDREADER/patches/device_rockchip_common/*.patch
+cd system/sepolicy && git am /path/to/UFIDREADER/patches/system_sepolicy/*.patch
 ```
 
 `hardware/rockchip/uhf/` doesn't exist yet in a stock tree — apply its patch into a fresh empty

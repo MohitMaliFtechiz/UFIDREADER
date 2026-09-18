@@ -1,7 +1,7 @@
 From d6906b476bf5968bb69c06366dd0b8b5f0d93da8 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:31:26 +0200
-Subject: [PATCH 09/13] uhf: wire services.core.unboosted to the
+Subject: [PATCH 09/17] uhf: wire services.core.unboosted to the
  rockchip.uhf.aidl Java library
 
 Real build failure, found by actually running the build (not by

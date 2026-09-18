@@ -1,7 +1,7 @@
 From 2f2cf3f32653b632a7827fe53ad1ba4ffb80590d Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:40:36 +0200
-Subject: [PATCH 04/10] uhf: use List<byte[]> instead of byte[][] in
+Subject: [PATCH 04/15] uhf: use List<byte[]> instead of byte[][] in
  IUhfReaderCallback
 
 Real compiler failure, found by actually running the build (not by

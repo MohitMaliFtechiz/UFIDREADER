@@ -1,0 +1,52 @@
+From 7be46e826e4c725e177f411b135f78fcd82fb7ee Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 14:51:11 +0200
+Subject: [PATCH 13/15] uhf: grant hal_uhf_default read access to
+ ro.vendor.uhf.device
+
+Proactive fix, found by reading the real sepolicy macros before it could
+cost a build-flash-test cycle to notice: the previous commit's
+GetProperty("ro.vendor.uhf.device", ...) read has no sepolicy grant
+behind it. ro.vendor. maps to vendor_default_prop
+(system/sepolicy/private/property_contexts), and none of
+init_daemon_domain/binder_use/hal_server_domain already used in this file
+grant generic property-file read access - confirmed by reading
+te_macros' own get_prop() definition (allow $1 $2:file { getattr open
+read map };) and checking no baseline HAL macro already includes an
+equivalent grant.
+
+Without this, the property read would be denied and, per how Android
+property reads behave under SELinux, silently return the "not set" case
+- i.e. always the /dev/ttyUSB0 default - which would look identical to
+the property genuinely being unset, making the previous commit's fix
+look like it did nothing on real hardware.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/sepolicy/hal_uhf.te | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/aidl/default/sepolicy/hal_uhf.te b/aidl/default/sepolicy/hal_uhf.te
+index 28f3ab6..e60d227 100644
+--- a/aidl/default/sepolicy/hal_uhf.te
++++ b/aidl/default/sepolicy/hal_uhf.te
+@@ -39,6 +39,16 @@ allow hal_uhf_default usb_serial_device:chr_file rw_file_perms;
+ type uhf_device, dev_type, file_type;
+ allow hal_uhf_default uhf_device:chr_file rw_file_perms;
+ 
++# ro.vendor.uhf.device (UhfReader.cpp) needs an explicit grant like every other property read: the
++# ro.vendor. prefix maps to vendor_default_prop in system/sepolicy/private/property_contexts, and
++# nothing in init_daemon_domain/binder_use/hal_server_domain above grants generic property-file
++# read access — confirmed by reading te_macros' own get_prop() definition and cross-checking that
++# no baseline HAL macro already includes it. Without this, GetProperty()'s read is denied and
++# silently returns the "not set" case, i.e. the /dev/ttyUSB0 default - the exact kind of failure
++# that would look identical to the property never having been set at all, and is worth avoiding
++# before it costs a build-flash-test cycle to notice.
++get_prop(hal_uhf_default, vendor_default_prop)
++
+ # system_server is a client of this HAL (UhfHalTransport binds to rockchip.uhf.aidl.IUhfReader),
+ # but system_server must NOT itself hold the device node open — that is exactly the Treble
+ # layering violation §3.2 exists to avoid. hal_client_domain grants Binder-call permission only;
+-- 
+2.34.1
+

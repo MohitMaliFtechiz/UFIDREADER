@@ -1,0 +1,299 @@
+From 4c65699d12d06a64206cecff620e1eab6a190192 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 16:03:46 +0200
+Subject: [PATCH 17/17] uhf: retry the transport connection on openSession(),
+ and fix dumpsys's semantics
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two real gaps, reported from actual hardware testing:
+
+1. Reader presence was latched at boot. A UART reader has no uevent to
+   re-probe on, unlike a hot-pluggable USB device — if it was absent or
+   unpowered when performStartupReset() ran once at boot,
+   transport.isOpen() stays false forever; nothing ever tried again, not
+   a HAL restart, not openSession(), which just checked/set exclusivity
+   and never touched the transport at all. Only a reboot recovered it.
+
+   openSession() now retries performStartupReset() when the transport
+   isn't open, exactly once per absence (transport.isOpen() becomes true
+   regardless of whether the reader actually answers - see point 2 -
+   so this doesn't retry on every single call). Best-effort, not gating:
+   the session is still granted even if the retry's own transact() also
+   times out, the same way a reader that disappears mid-session doesn't
+   retroactively invalidate the session already open. openSession()
+   arbitrates exclusivity (FR-LC-03), not hardware presence (FR-LC-01);
+   the caller's own next call surfaces the real error, same as always.
+
+2. dumpsys uhf conflated "open() succeeded" with "a reply arrived":
+   it reported "transport open (reader responded to startup reset):
+   true" while rx had been 0 since boot, because opening a UART fd
+   always succeeds as soon as the device node exists, whether or not
+   anything is actually attached and answering on the other end -
+   exactly the failure this diagnostic exists to surface, hidden by its
+   own wrong label.
+
+   Added UhfSessionArbiter#hasReaderResponded(), tracking whether a
+   transact() has actually completed since the transport was last
+   (re)opened - set true only when performStartupReset()'s own
+   transact() doesn't throw, reset to false at the start of every
+   attempt. UhfService#dump() now reports transport-open and
+   reader-responded as two separate lines instead of one conflated one,
+   and "reader connected" now reflects hasReaderResponded(), not
+   isTransportOpen().
+
+Verified by actually compiling and running the full UhfSessionArbiterTest
+suite (68 tests, up from 63) with real javac + JUnit 4. Three existing
+tests (setEnabledAntennas_skipsTheInterlockWhenCheckWasAlreadyOff,
+killTag_rejectsAllZeroPassword,
+lockTag_permanentStateWithoutConfirmIsRejected) called openSession()
+against a never-opened FakeTransport and asserted an exact/empty call
+log - a real, expected interaction with fix #1's new retry behavior,
+not a false positive: updated them to open the transport first (matching
+the realistic "already booted" precondition they were actually meant to
+test), which is what a real run caught immediately. FakeTransport gained
+a one-shot failNextTransact flag to let the new tests simulate "fd opened
+fine, reader didn't reply" - the exact real bug being fixed - as
+distinct from "transport never opened at all".
+
+UhfService.java itself isn't host-compilable (real Android framework
+dependencies), so the dump() change there was verified by careful
+inline review only, not execution - noted here rather than glossed over.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../com/android/server/uhf/UhfService.java    | 16 +++-
+ .../android/server/uhf/UhfSessionArbiter.java | 31 +++++++
+ .../server/uhf/UhfSessionArbiterTest.java     | 84 +++++++++++++++++++
+ 3 files changed, 128 insertions(+), 3 deletions(-)
+
+diff --git a/services/core/java/com/android/server/uhf/UhfService.java b/services/core/java/com/android/server/uhf/UhfService.java
+index 23a90fc9..acefab4f 100644
+--- a/services/core/java/com/android/server/uhf/UhfService.java
++++ b/services/core/java/com/android/server/uhf/UhfService.java
+@@ -663,15 +663,25 @@ public final class UhfService extends SystemService {
+                 return;
+             }
+             boolean transportOpen = mArbiter.isTransportOpen();
++            boolean readerResponded = mArbiter.hasReaderResponded();
+             pw.println("UhfService:");
+-            pw.println("  transport open (reader responded to startup reset): " + transportOpen);
++            // Two separate lines on purpose, not one: transportOpen only means the HAL's fd is
++            // valid, which for a UART is true as soon as the device node exists, whether or not
++            // anything is attached to the far end — it was previously mislabeled here as "reader
++            // responded to startup reset", which is readerResponded's job, not transportOpen's.
++            pw.println("  transport open (device node fd valid): " + transportOpen);
++            pw.println("  reader responded (answered at least one command since last (re)open): "
++                    + readerResponded);
+             // Kept in sync by hand with hardware/rockchip/uhf/aidl/default/UhfReader.cpp's
+             // kDevicePathProperty — system_server has no other way to know which node the HAL
+             // opened, short of adding AIDL surface purely for this diagnostic, which isn't worth
+-            // it for a value already visible via getprop.
++            // it for a value already visible via getprop. Needs its own get_prop(system_server,
++            // uhf_prop) sepolicy grant to actually see the configured value rather than silently
++            // falling back to the default here too — see hal_uhf.te's own comment on why a plain
++            // vendor_default_prop grant can't cover this on this tree.
+             pw.println("  configured device (ro.vendor.uhf.device, HAL default /dev/ttyUSB0): "
+                     + SystemProperties.get("ro.vendor.uhf.device", "/dev/ttyUSB0"));
+-            pw.println("  reader connected: " + (transportOpen ? "yes" : "no"));
++            pw.println("  reader connected: " + (readerResponded ? "yes" : "no"));
+             pw.println("  open sessions: " + mSessions.size());
+         }
+     }
+diff --git a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+index 464d8c08..9dd2d6ef 100644
+--- a/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
++++ b/services/core/java/com/android/server/uhf/UhfSessionArbiter.java
+@@ -122,6 +122,11 @@ public final class UhfSessionArbiter {
+     public static final int LOCK_PERM_LOCKED = 3; // LOCK_* constants — see UhfService's mapping.
+ 
+     private Object holder; // null = no session held
++    // Distinct from transport.isOpen(): opening a UART fd always succeeds as soon as the device
++    // node exists, whether or not anything is actually attached to the far end — it says nothing
++    // about whether the reader has ever answered. Set only by a transact() inside
++    // performStartupReset() actually completing; see hasReaderResponded().
++    private boolean readerResponded;
+     private ReaderMode mode = ReaderMode.IDLE;
+     private int antennaMask;
+     private int rfPower;
+@@ -163,10 +168,12 @@ public final class UhfSessionArbiter {
+      */
+     public synchronized void performStartupReset() throws UhfTransportException {
+         transport.open();
++        readerResponded = false; // reset before attempting — see hasReaderResponded()'s doc
+         // FR-LC-05: unconditional — do not check current mode first, because a device that was
+         // streaming when powered off answers this exact query with more streamed tag frames, not
+         // a clean answer. Force the transition every time.
+         transport.transact(CMD_REALTIME_MODE, new byte[] {0x00}, DEFAULT_TIMEOUT_MS);
++        readerResponded = true; // only reached if the transact above didn't throw
+         mode = ReaderMode.IDLE;
+ 
+         // FR-LC-09: region is reasserted from platform storage, not read back and trusted. If the
+@@ -188,9 +195,33 @@ public final class UhfSessionArbiter {
+         if (holder != null) {
+             throw new UhfBusyException();
+         }
++        if (!transport.isOpen()) {
++            // A UART reader has no uevent to re-probe on, unlike a hot-pluggable USB device: if
++            // it was absent or unpowered when performStartupReset() ran at boot, nothing else
++            // ever retries until this exact moment — a client actually asking to use it. Only
++            // reachable once per absence: transport.isOpen() is true after this regardless of
++            // whether the reader actually answered (see hasReaderResponded()), so a session that
++            // opens against a still-absent reader gets exactly one retry here, not one per call.
++            //
++            // Best-effort, not gating: still grant the session even if this fails, the same way
++            // a reader that disappears mid-session doesn't retroactively invalidate the session
++            // that was already open — openSession() arbitrates exclusivity (FR-LC-03), not
++            // hardware presence (FR-LC-01); the caller's own next call surfaces the real error.
++            try {
++                performStartupReset();
++            } catch (UhfTransportException ignored) {
++            }
++        }
+         holder = clientToken;
+     }
+ 
++    /** Distinct from {@link #isTransportOpen}: whether the reader has actually answered at least
++     * one command since the transport was last (re)opened, not just whether the fd is valid —
++     * opening a UART succeeds regardless of whether anything is attached to the far end. */
++    public synchronized boolean hasReaderResponded() {
++        return readerResponded;
++    }
++
+     /** Graceful close, called by the client itself. */
+     public synchronized void closeSession(Object clientToken) {
+         requireHolder(clientToken);
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+index 82948923..30ceb898 100644
+--- a/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfSessionArbiterTest.java
+@@ -113,6 +113,70 @@ public class UhfSessionArbiterTest {
+         assertTrue(arbiter.isHeldBy(clientB));
+     }
+ 
++    // ---------------------------------------------------------------------------------------
++    // A UART reader has no uevent to re-probe on: if it was absent/unpowered at boot,
++    // performStartupReset() never gets a second chance until a client actually asks to use it.
++    // ---------------------------------------------------------------------------------------
++
++    @Test
++    public void openSession_retriesStartupResetWhenTransportWasNeverOpened() throws Exception {
++        Object client = new Object();
++        assertFalse("precondition: nothing has opened the transport yet", transport.isOpen());
++
++        arbiter.openSession(client);
++
++        assertTrue("openSession() must retry the boot-time reset it never got",
++                transport.calls.contains("open"));
++        assertTrue(transport.isOpen());
++        assertTrue(arbiter.isHeldBy(client));
++    }
++
++    @Test
++    public void openSession_grantsTheSessionEvenWhenTheRetryStillFindsNoReader() throws Exception {
++        Object client = new Object();
++        transport.failNextTransact = true; // the retry's own transact() times out too
++
++        arbiter.openSession(client); // must not throw — exclusivity, not hardware presence
++
++        assertTrue("session grant is best-effort on the retry, not gated by its success",
++                arbiter.isHeldBy(client));
++    }
++
++    @Test
++    public void openSession_doesNotRetryWhenTransportIsAlreadyOpen() throws Exception {
++        Object client = new Object();
++        arbiter.performStartupReset();
++        transport.reset();
++
++        arbiter.openSession(client);
++
++        assertTrue("no reason to redo the reset sequence when the transport never closed",
++                transport.calls.isEmpty());
++    }
++
++    @Test
++    public void hasReaderResponded_isFalseUntilATransactActuallySucceeds() throws Exception {
++        transport.failNextTransact = true;
++        try {
++            arbiter.performStartupReset();
++            fail("expected the injected timeout to propagate");
++        } catch (UhfTransportException expected) {
++            // pass
++        }
++
++        assertTrue("fd is open regardless of whether the reader ever replied",
++                transport.isOpen());
++        assertFalse("no reply was actually received — must not be conflated with isOpen()",
++                arbiter.hasReaderResponded());
++    }
++
++    @Test
++    public void hasReaderResponded_isTrueOnceStartupResetActuallyGetsAReply() throws Exception {
++        arbiter.performStartupReset();
++
++        assertTrue(arbiter.hasReaderResponded());
++    }
++
+     @Test
+     public void onClientDied_releasesSessionAndReturnsReaderToIdle() throws Exception {
+         Object clientA = new Object();
+@@ -210,6 +274,10 @@ public class UhfSessionArbiterTest {
+     @Test
+     public void setEnabledAntennas_skipsTheInterlockWhenCheckWasAlreadyOff() throws Exception {
+         Object client = new Object();
++        // Transport already open (matching a real, already-booted reader) so openSession()'s own
++        // retry-on-closed-transport doesn't add its own calls to the log this test checks below.
++        transport.open();
++        transport.reset();
+         arbiter.openSession(client);
+         // antennaCheckEnabled defaults to false; no setAntennaCheckEnabled(true) call.
+ 
+@@ -816,6 +884,10 @@ public class UhfSessionArbiterTest {
+     @Test
+     public void killTag_rejectsAllZeroPassword() throws Exception {
+         Object client = new Object();
++        // Transport already open so openSession()'s own retry-on-closed-transport doesn't add its
++        // own calls to the log this test checks is empty below.
++        transport.open();
++        transport.reset();
+         arbiter.openSession(client);
+         try {
+             arbiter.killTag(client, epcFilter(new byte[] {1, 2}), new byte[] {0, 0, 0, 0});
+@@ -853,6 +925,10 @@ public class UhfSessionArbiterTest {
+     @Test
+     public void lockTag_permanentStateWithoutConfirmIsRejected() throws Exception {
+         Object client = new Object();
++        // Transport already open so openSession()'s own retry-on-closed-transport doesn't add its
++        // own calls to the log this test checks is empty below.
++        transport.open();
++        transport.reset();
+         arbiter.openSession(client);
+         try {
+             arbiter.lockTag(client, epcFilter(new byte[] {1, 2}), 0,
+@@ -935,6 +1011,7 @@ public class UhfSessionArbiterTest {
+         boolean isOpen;
+         boolean failStopStream;
+         boolean failNextStartStream;
++        boolean failNextTransact;
+         final java.util.Map<Integer, byte[]> cannedReplies = new java.util.HashMap<>();
+         byte[] lastInventoryPayload;
+         byte[] lastBufferedStartPayload;
+@@ -965,6 +1042,13 @@ public class UhfSessionArbiterTest {
+ 
+         @Override public byte[] transact(int command, byte[] payload, int timeoutMs)
+                 throws UhfTransportException {
++            if (failNextTransact) {
++                failNextTransact = false;
++                // Matches the real bug this simulates: open() on a UART always succeeds as soon
++                // as the device node exists, whether or not a reader is actually attached and
++                // answering — the fd being open and a reply arriving are two different things.
++                throw new UhfTransportException(UhfProtocol.ERROR_TIMEOUT, "injected timeout");
++            }
+             calls.add("transact(0x" + Integer.toHexString(command) + ")");
+             if (command == 0x66 && payload.length > 0) {
+                 antennaCheckValues.add((int) payload[0]);
+-- 
+2.34.1
+

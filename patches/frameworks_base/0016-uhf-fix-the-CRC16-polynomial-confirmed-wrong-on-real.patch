@@ -1,0 +1,139 @@
+From fa469c015838d9cd9adde3368a919f1512f5c867 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 16:03:15 +0200
+Subject: [PATCH 16/17] uhf: fix the CRC16 polynomial - confirmed wrong on real
+ hardware
+
+Real blocker, reported from actual reader hardware, not an inference
+this time: every command timed out, UART tx counters advancing while rx
+stayed at zero since boot - the reader never once replied to the HAL,
+though it answered a shell probe on the same port in ~100ms.
+
+Proven back to back on the wire with the HAL stopped:
+
+  04 ff 21 b1 e9  -- CRC-16/MODBUS (poly 0xA001), our previous guess -> silent
+  04 ff 21 19 95  -- poly 0x8408, same init/algorithm otherwise       -> full reply
+
+Independently reproduced here: computing both polynomials over the same
+three leading bytes (04 ff 21) with this class's own init (0xFFFF) and
+bit-reflected structure gives exactly b1 e9 for 0xA001 and exactly 19 95
+for 0x8408 - and the full 5-byte captured frame (04 ff 21 19 95) CRCs to
+zero under 0x8408, confirming both the polynomial and that nothing else
+in the frame/CRC structure needs to change.
+
+This was always isolated to exactly one constant on purpose (see the
+class's own prior doc comment) specifically so a wrong guess would be
+cheap to fix - changed CRC16's poly literal from 0xA001 to 0x8408 and
+rewrote the class/method doc to state the confirmed algorithm instead of
+the MODBUS inference. Added a new test,
+crc16_matchesRealHardwareCapture, pinning the actual captured bytes -
+every other CRC test in this class is a round-trip property (build then
+validate, or determinism) that holds for any polynomial including the
+wrong one, which is exactly why none of them caught this; a real
+hardware-derived vector is the only kind of test that can.
+
+Verified by actually compiling and running the full UhfProtocolTest
+suite (all 38 tests, including the new one) with real javac + JUnit 4,
+not just by inspection.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ .../com/android/server/uhf/UhfProtocol.java   | 33 ++++++++++---------
+ .../android/server/uhf/UhfProtocolTest.java   | 16 +++++++++
+ 2 files changed, 33 insertions(+), 16 deletions(-)
+
+diff --git a/services/core/java/com/android/server/uhf/UhfProtocol.java b/services/core/java/com/android/server/uhf/UhfProtocol.java
+index e10aa9f7..d82851e3 100644
+--- a/services/core/java/com/android/server/uhf/UhfProtocol.java
++++ b/services/core/java/com/android/server/uhf/UhfProtocol.java
+@@ -31,17 +31,17 @@ import java.util.List;
+  * with the highest cost of being wrong (FR-LNK-06's note describes a corrupted-command failure
+  * mode that a naive implementation reproduces easily).
+  *
+- * <p><b>What is settled vs. assumed.</b> The frame shape, the requirement that CRC over the whole
+- * frame (including its own CRC bytes) come out to zero, the resync rule, and the reCmd-matching
+- * rule are all directly and unambiguously stated in UHF-SRS-001 &sect;4.3 and are implemented
+- * exactly as specified. The one thing the SRS does not pin down is the CRC16 variant: "CRC16" is
+- * an algorithm family, not one algorithm. This class assumes CRC-16/MODBUS (reflected, poly
+- * 0xA001, init 0xFFFF, no xorout) because that is the variant used by every other reader in this
+- * family's lineage that exposes this exact frame shape, but until R1/R3 is on disk (SRS OI-01)
+- * this is an inference, not a verified fact — see {@link #CRC16_INIT}. If it is wrong, exactly one
+- * constant changes; every test in UhfProtocolTest that depends on it is written against that same
+- * constant, not against a hand-computed magic number, so a wrong assumption fails loudly instead
+- * of silently.
++ * <p><b>CRC16 variant — confirmed on real hardware, not an inference.</b> The frame shape, the
++ * requirement that CRC over the whole frame (including its own CRC bytes) come out to zero, the
++ * resync rule, and the reCmd-matching rule are all directly and unambiguously stated in
++ * UHF-SRS-001 &sect;4.3 and are implemented exactly as specified. The CRC16 variant was originally
++ * an inference (CRC-16/MODBUS, poly 0xA001) because that is the variant used by every other reader
++ * in this family's lineage that exposes this exact frame shape — but that inference was wrong.
++ * Proven back to back on the wire with a real reader, HAL stopped: the frame {@code 04 ff 21} with
++ * the MODBUS CRC ({@code b1 e9}) was silently ignored; the identical frame with poly 0x8408
++ * instead ({@code 19 95}) got a full reply. Same init (0xFFFF), same reflected/LSB-first
++ * structure — only the polynomial constant differs, exactly as the "isolated to one constant"
++ * design here was meant to allow. See {@link #CRC16_INIT}.
+  */
+ public final class UhfProtocol {
+ 
+@@ -54,8 +54,8 @@ public final class UhfProtocol {
+     public static final int MAX_LEN_FIELD = 0xFF;
+ 
+     /**
+-     * CRC-16/MODBUS initial register value. See the class doc: this is an inference pending R1,
+-     * isolated to this one constant on purpose.
++     * CRC16 initial register value — confirmed correct on real hardware alongside the polynomial
++     * below. See the class doc for the byte-level proof.
+      */
+     static final int CRC16_INIT = 0xFFFF;
+ 
+@@ -64,8 +64,9 @@ public final class UhfProtocol {
+     // -------------------------------------------------------------------------------------------
+ 
+     /**
+-     * Computes CRC-16/MODBUS (reflected, poly 0xA001, init {@link #CRC16_INIT}, xorout 0) over
+-     * {@code length} bytes of {@code data} starting at {@code offset}.
++     * Computes this reader's CRC16 (reflected, poly 0x8408, init {@link #CRC16_INIT}, xorout 0)
++     * over {@code length} bytes of {@code data} starting at {@code offset}. See the class doc for
++     * the real-hardware proof of the polynomial.
+      */
+     public static int crc16(byte[] data, int offset, int length) {
+         if (data == null) {
+@@ -82,7 +83,7 @@ public final class UhfProtocol {
+                 boolean lsbSet = (crc & 0x0001) != 0;
+                 crc >>>= 1;
+                 if (lsbSet) {
+-                    crc ^= 0xA001;
++                    crc ^= 0x8408;
+                 }
+             }
+         }
+diff --git a/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java b/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java
+index 1fa61951..fda105a3 100644
+--- a/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java
++++ b/services/tests/servicestests/src/com/android/server/uhf/UhfProtocolTest.java
+@@ -82,6 +82,22 @@ public class UhfProtocolTest {
+         }
+     }
+ 
++    /**
++     * The one test in this class that isn't self-consistent by construction: every other CRC test
++     * here checks a round-trip property (build then validate, or determinism) that holds for
++     * <em>any</em> polynomial, including the wrong one this class shipped with for a while
++     * (CRC-16/MODBUS, poly 0xA001) — which is exactly why none of them caught it. This pins the
++     * actual bytes captured off a real reader, HAL stopped, address 0xFF (broadcast) / command
++     * 0x21 (identify), no payload: {@code 04 ff 21 19 95}. With the wrong polynomial the same
++     * three leading bytes produce {@code b1 e9}, a frame the reader silently ignores.
++     */
++    @Test
++    public void crc16_matchesRealHardwareCapture() {
++        byte[] frame = {0x04, (byte) 0xFF, 0x21, 0x19, (byte) 0x95};
++        assertEquals(0, UhfProtocol.crc16(frame, 0, frame.length));
++        assertTrue(UhfProtocol.isCrcValid(frame, 0, frame.length));
++    }
++
+     @Test
+     public void crc16_flippingAnyByteInvalidatesTheFrame() {
+         byte[] frame = UhfProtocol.buildFrame(0xFF, 0x21, new byte[] {1, 2, 3, 4, 5});
+-- 
+2.34.1
+

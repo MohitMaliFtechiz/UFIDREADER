@@ -1,7 +1,7 @@
 From 34d7e73fdafb0e8fcb2e1e71bb19f2515740a773 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Tue, 15 Sep 2026 09:46:19 +0200
-Subject: [PATCH 03/13] uhf: switch UhfService to the Phase 2 HAL transport,
+Subject: [PATCH 03/17] uhf: switch UhfService to the Phase 2 HAL transport,
  retire the JNI path
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -1,7 +1,7 @@
 From 2e677db82c4b12a713d5bdfc08c6575a58dfa089 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 08:44:39 +0200
-Subject: [PATCH 06/13] uhf: add missing parcelable declaration files for the
+Subject: [PATCH 06/17] uhf: add missing parcelable declaration files for the
  AIDL interfaces
 
 Every custom Parcelable referenced from an AIDL interface needs a

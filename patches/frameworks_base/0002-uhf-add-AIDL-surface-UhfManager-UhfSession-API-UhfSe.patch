@@ -1,7 +1,7 @@
 From 66d0c387f40b3d14bc35349e1e565151b78b55f7 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Tue, 15 Sep 2026 09:32:26 +0200
-Subject: [PATCH 02/13] uhf: add AIDL surface, UhfManager/UhfSession API,
+Subject: [PATCH 02/17] uhf: add AIDL surface, UhfManager/UhfSession API,
  UhfService, JNI transport scaffold
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

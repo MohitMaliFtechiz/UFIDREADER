@@ -1,7 +1,7 @@
 From 9f0a8fd725d6cd644352579ed0fc94a362f86ff1 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:43:04 +0200
-Subject: [PATCH 05/10] uhf: List<byte[]> isn't legal structured AIDL either -
+Subject: [PATCH 05/15] uhf: List<byte[]> isn't legal structured AIDL either -
  wrap in a parcelable
 
 Real compiler failure, found by actually running

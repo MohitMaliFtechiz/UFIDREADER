@@ -1,0 +1,139 @@
+From deacca86b4691219cee1411f9a0609a48f8e8bd1 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 14:46:17 +0200
+Subject: [PATCH 12/15] uhf: make the reader device path board-configurable
+ (ro.vendor.uhf.device)
+
+Real hardware gap, reported from actual on-device testing: the HAL had
+/dev/ttyUSB0 hardcoded, but this board's reader is wired to the native
+TTL UART (SoC UART5, pin mux uart5m1), which this vendor build's
+kernel/ueventd exposes as /dev/ttyDC3, not a USB-serial adapter.
+
+  E rockchip.uhf-service: open(/dev/ttyUSB0) failed: No such file or
+  directory
+
+Rather than swap one hardcoded constant for another, UhfReader::open()
+now reads the path from ro.vendor.uhf.device (android::base::GetProperty,
+libbase - already a shared_lib dependency, no new one needed), falling
+back to /dev/ttyUSB0 when unset. One HAL binary now works whether a given
+board's reader is on a USB adapter or a native board UART; only the
+per-product property value is board-specific
+(device/rockchip/rk3576/rk3576_u sets it in a companion commit).
+
+sepolicy: hal_uhf.te now grants hal_uhf_default both usb_serial_device
+(the existing USB-adapter grant) and a re-added bespoke uhf_device type
+for the native-UART case. uhf_device was removed earlier in this series
+specifically because /dev/ttyUSB[0-9]* collides with a platform-wide
+file_contexts rule for that exact pattern - that collision risk doesn't
+apply to a board's own native UART name (ttyDC3 here), so the bespoke
+type is safe and correct for this path.
+
+"Reader absent at boot must stay non-fatal" was already correctly
+implemented (UhfService.java's onStart() catches UhfTransportException
+and logs a warning rather than failing boot) - confirmed by inspection,
+not changed, since the original bug report's own log evidence is that
+exact non-fatal warning path already working correctly.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/UhfReader.cpp       | 20 +++++++++++++++----
+ aidl/default/sepolicy/hal_uhf.te | 33 ++++++++++++++++++++------------
+ 2 files changed, 37 insertions(+), 16 deletions(-)
+
+diff --git a/aidl/default/UhfReader.cpp b/aidl/default/UhfReader.cpp
+index c0509db..498ad45 100644
+--- a/aidl/default/UhfReader.cpp
++++ b/aidl/default/UhfReader.cpp
+@@ -23,7 +23,10 @@
+ #include <termios.h>
+ #include <unistd.h>
+ 
++#include <string>
++
+ #include <android-base/logging.h>
++#include <android-base/properties.h>
+ 
+ #include "UhfWireProtocol.h"
+ 
+@@ -55,8 +58,15 @@ namespace {
+ constexpr int32_t kErrorTimeout = 6;
+ constexpr int32_t kErrorDeviceLost = 7;
+ 
+-// FR-LNK-01.
+-constexpr const char* kDevicePath = "/dev/ttyUSB0"; // see OI-05 on narrowing this match
++// FR-LNK-01. Board-configurable, not a fixed constant: the reader may be on a USB-serial adapter
++// (ttyUSB0, the default - matches the reference hardware this HAL was originally written against)
++// or a board's native TTL UART under whatever name that board's kernel/ueventd gives it (e.g.
++// ttyDC3 on a board that renames ttyS* to ttyDC*). One image should work either way, so the path
++// is a read-only product property instead of a compile-time #define - see
++// device/rockchip/rk3576/rk3576_u's PRODUCT_VENDOR_PROPERTIES for this board's actual value, and
++// OI-05 on narrowing the sepolicy match this still implies for a wildcard-style path.
++constexpr const char* kDevicePathProperty = "ro.vendor.uhf.device";
++constexpr const char* kDefaultDevicePath = "/dev/ttyUSB0";
+ constexpr speed_t kBaudRate = B115200;
+ constexpr int64_t kInterByteGapNanos = 15'000'000; // FR-LNK-05
+ constexpr int kReadPollTimeoutMs = 500;
+@@ -97,9 +107,11 @@ UhfReader::~UhfReader() {
+     if (mFd >= 0) {
+         return ::ndk::ScopedAStatus::ok(); // idempotent, per the interface's Java-side contract
+     }
+-    int fd = ::open(kDevicePath, O_RDWR | O_NOCTTY);
++    std::string devicePath =
++            ::android::base::GetProperty(kDevicePathProperty, kDefaultDevicePath);
++    int fd = ::open(devicePath.c_str(), O_RDWR | O_NOCTTY);
+     if (fd < 0) {
+-        LOG(ERROR) << "open(" << kDevicePath << ") failed: " << strerror(errno);
++        LOG(ERROR) << "open(" << devicePath << ") failed: " << strerror(errno);
+         return ::ndk::ScopedAStatus::fromServiceSpecificError(kErrorDeviceLost);
+     }
+     termios tty{};
+diff --git a/aidl/default/sepolicy/hal_uhf.te b/aidl/default/sepolicy/hal_uhf.te
+index be1efca..28f3ab6 100644
+--- a/aidl/default/sepolicy/hal_uhf.te
++++ b/aidl/default/sepolicy/hal_uhf.te
+@@ -15,21 +15,30 @@ hal_attribute_service(hal_uhf, hal_uhf_service)
+ binder_call(hal_uhf_client, hal_uhf_server)
+ binder_call(hal_uhf_server, hal_uhf_client)
+ 
+-# NFR-S-01: only this domain may touch the reader's device node.
++# NFR-S-01: only this domain may touch the reader's device node. Two types are granted, because
++# the actual device node is now board-configurable (ro.vendor.uhf.device, see UhfReader.cpp) and
++# can be either kind depending on how a given board wires the reader up:
+ #
+-# usb_serial_device (system/sepolicy/public/device.te), not a bespoke uhf_device type: a real
+-# build (out/host/linux-x86/bin/sefcontext_compile) rejected a device-specific file_contexts entry
+-# labeling /dev/ttyUSB[0-9]* as uhf_device, because system/sepolicy/private/file_contexts already
+-# labels that exact same pattern usb_serial_device platform-wide (present since sepolicy API 30) —
+-# "Multiple different specifications for /dev/ttyUSB[0-9]*". Confirmed no other domain in this
+-# tree is granted usb_serial_device access on this product (hal_can_socketcan.te is the only other
+-# reference tree-wide, an unrelated CAN-bus HAL not part of this product), so NFR-S-01 - only this
+-# domain may touch the reader's node - still holds on rk3576_u even though the type itself is
+-# platform-shared rather than bespoke. See device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts'
+-# OI-05 TODO: this is still the same "every ttyUSB* on the board" approximation as before, just
+-# expressed through the platform's own type instead of a colliding duplicate one.
++# - usb_serial_device (system/sepolicy/public/device.te), not a bespoke type, for the USB-adapter
++#   case: a real build (out/host/linux-x86/bin/sefcontext_compile) rejected a device-specific
++#   file_contexts entry labeling /dev/ttyUSB[0-9]* as uhf_device, because
++#   system/sepolicy/private/file_contexts already labels that exact same pattern
++#   usb_serial_device platform-wide (present since sepolicy API 30) — "Multiple different
++#   specifications for /dev/ttyUSB[0-9]*". Confirmed no other domain in this tree is granted
++#   usb_serial_device access on this product (hal_can_socketcan.te is the only other reference
++#   tree-wide, an unrelated CAN-bus HAL not part of this product), so this domain is still the
++#   only one that can reach a node with this label here.
++# - uhf_device, a bespoke type declared here (board-independently, like hal_uhf_default itself) so
++#   any board using this HAL can label its own native-UART reader node with it — see
++#   device/rockchip/rk3576/rk3576_u/sepolicy/file_contexts for the board-specific path (ttyDC3)
++#   this actually gets attached to on that product. No collision risk the way ttyUSB[0-9]* had:
++#   ttyDC* is this vendor's own renamed-ttyS* scheme, not a pattern any platform-wide
++#   file_contexts entry already claims.
+ allow hal_uhf_default usb_serial_device:chr_file rw_file_perms;
+ 
++type uhf_device, dev_type, file_type;
++allow hal_uhf_default uhf_device:chr_file rw_file_perms;
++
+ # system_server is a client of this HAL (UhfHalTransport binds to rockchip.uhf.aidl.IUhfReader),
+ # but system_server must NOT itself hold the device node open — that is exactly the Treble
+ # layering violation §3.2 exists to avoid. hal_client_domain grants Binder-call permission only;
+-- 
+2.34.1
+

@@ -1,0 +1,79 @@
+From 0b9771a76a043e22cc5f370893aee1478c0c37d3 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 13:14:57 +0200
+Subject: [PATCH] sepolicy: satisfy sepolicy_freeze_test and
+ fuzzer_bindings_test for the new uhf service
+
+Real build failures, found by actually running the build after the
+previous commit added uhf_service:
+
+  FAILED: system/sepolicy/sepolicy_freeze_test
+  Files system/sepolicy/public/service.te and
+  system/sepolicy/prebuilts/api/34.0/public/service.te differ
+
+  FAILED: system/sepolicy/contexts/fuzzer_bindings_test
+  error: Service 'uhf' is being added, but we have no fuzzer on file
+  for it.
+
+Two independent, unrelated checks, both real and both documented in
+their own error output:
+
+- sepolicy_freeze_test diffs system/sepolicy/public and private against
+  the frozen prebuilts/api/34.0 snapshot and requires them identical on
+  this API-34 branch. Mirrored the same uhf_service type declaration and
+  service_contexts line into prebuilts/api/34.0/public/service.te and
+  prebuilts/api/34.0/private/service_contexts.
+- fuzzer_bindings_test requires every newly-added ServiceManager entry to
+  either have a registered fuzzer or an explicit EXCEPTION_NO_FUZZER
+  exemption in service_fuzzer_bindings.go. The tool's own error message
+  says automatic service fuzzers aren't supported for Java services (b/
+  232439254) and to add an exemption instead - added "uhf":
+  EXCEPTION_NO_FUZZER, next to every other Java system-server service's
+  identical exemption (uce, uimode, updatelock, etc. all do the same).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ build/soong/service_fuzzer_bindings.go      | 1 +
+ prebuilts/api/34.0/private/service_contexts | 1 +
+ prebuilts/api/34.0/public/service.te        | 1 +
+ 3 files changed, 3 insertions(+)
+
+diff --git a/build/soong/service_fuzzer_bindings.go b/build/soong/service_fuzzer_bindings.go
+index 63a07e9..4da5d14 100644
+--- a/build/soong/service_fuzzer_bindings.go
++++ b/build/soong/service_fuzzer_bindings.go
+@@ -436,6 +436,7 @@ var (
+ 		"tv_input":                     EXCEPTION_NO_FUZZER,
+ 		"tv_tuner_resource_mgr":        EXCEPTION_NO_FUZZER,
+ 		"uce":                          EXCEPTION_NO_FUZZER,
++		"uhf":                          EXCEPTION_NO_FUZZER,
+ 		"uimode":                       EXCEPTION_NO_FUZZER,
+ 		"updatelock":                   EXCEPTION_NO_FUZZER,
+ 		"uri_grants":                   EXCEPTION_NO_FUZZER,
+diff --git a/prebuilts/api/34.0/private/service_contexts b/prebuilts/api/34.0/private/service_contexts
+index 553a71d..70e3aef 100644
+--- a/prebuilts/api/34.0/private/service_contexts
++++ b/prebuilts/api/34.0/private/service_contexts
+@@ -413,6 +413,7 @@ tv_interactive_app                        u:object_r:tv_iapp_service:s0
+ tv_input                                  u:object_r:tv_input_service:s0
+ tv_tuner_resource_mgr                     u:object_r:tv_tuner_resource_mgr_service:s0
+ uce                                       u:object_r:uce_service:s0
++uhf                                        u:object_r:uhf_service:s0
+ uimode                                    u:object_r:uimode_service:s0
+ updatelock                                u:object_r:updatelock_service:s0
+ uri_grants                                u:object_r:uri_grants_service:s0
+diff --git a/prebuilts/api/34.0/public/service.te b/prebuilts/api/34.0/public/service.te
+index b32314d..21aadba 100644
+--- a/prebuilts/api/34.0/public/service.te
++++ b/prebuilts/api/34.0/public/service.te
+@@ -240,6 +240,7 @@ type trust_service, app_api_service, system_server_service, service_manager_type
+ type tv_iapp_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type tv_input_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type tv_tuner_resource_mgr_service, app_api_service, system_server_service, service_manager_type;
++type uhf_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type uimode_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type updatelock_service, system_api_service, system_server_service, service_manager_type;
+ type uri_grants_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+-- 
+2.34.1
+

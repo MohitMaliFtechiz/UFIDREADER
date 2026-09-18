@@ -1,7 +1,7 @@
 From ee6405bc489f952dcde4ce77558d3d7b3fc43b42 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:31:09 +0200
-Subject: [PATCH 08/13] uhf: bless the UHF-SRS-001 API surface (make
+Subject: [PATCH 08/17] uhf: bless the UHF-SRS-001 API surface (make
  update-api)
 
 Runs `make update-api` now that the API Lint violations from the

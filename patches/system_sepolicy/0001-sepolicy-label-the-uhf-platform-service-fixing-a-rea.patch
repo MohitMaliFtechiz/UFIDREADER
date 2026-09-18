@@ -1,0 +1,71 @@
+From 135bc2cd8db19de32c1fab21c9bd76faf9f16023 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 13:08:00 +0200
+Subject: [PATCH] sepolicy: label the "uhf" platform service, fixing a real
+ on-device SELinux denial
+
+Real bug, confirmed on flashed hardware via the audit log (not by
+inspection):
+
+  avc: denied { add } for name=uhf ... tcontext=u:object_r:default_android_service:s0
+
+Context.UHF_SERVICE = "uhf" has been registered via SystemServiceRegistry
+and started from SystemServer since Phase 1, but no sepolicy anywhere in
+this tree ever gave that ServiceManager name its own type - it fell back
+to default_android_service, which system_server is not allowed to
+publish under. This is a different gap from hal_uhf_service (that one
+covers the vendor HAL's own rockchip.uhf.aidl.IUhfReader/default AIDL
+instance in hardware/rockchip/uhf/aidl/default/sepolicy/service_contexts
+- a completely separate ServiceManager entry from the platform-side "uhf"
+SystemService this commit fixes).
+
+Fix, following the exact precedent of comparable app-consumable,
+permission-gated, hardware-adjacent system services already in this file
+(bluetooth_manager_service, vibrator_manager_service, usagestats_service
+all use the identical attribute set):
+
+- public/service.te: type uhf_service, app_api_service,
+  ephemeral_app_api_service, system_server_service, service_manager_type;
+- private/service_contexts: uhf -> u:object_r:uhf_service:s0
+
+app_api_service is required for UhfManager to be reachable from
+third-party apps at all - confirmed by tracing
+system/sepolicy/private/untrusted_app_all.te's own
+`allow untrusted_app_all app_api_service:service_manager find;`, the rule
+that actually grants ordinary apps "find" on any app_api_service-tagged
+service. Without it, even a correctly-labeled uhf_service would still be
+unreachable from UhfTestApp or any other UHF_READ-holding app.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ private/service_contexts | 1 +
+ public/service.te        | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/private/service_contexts b/private/service_contexts
+index 553a71d..70e3aef 100644
+--- a/private/service_contexts
++++ b/private/service_contexts
+@@ -413,6 +413,7 @@ tv_interactive_app                        u:object_r:tv_iapp_service:s0
+ tv_input                                  u:object_r:tv_input_service:s0
+ tv_tuner_resource_mgr                     u:object_r:tv_tuner_resource_mgr_service:s0
+ uce                                       u:object_r:uce_service:s0
++uhf                                        u:object_r:uhf_service:s0
+ uimode                                    u:object_r:uimode_service:s0
+ updatelock                                u:object_r:updatelock_service:s0
+ uri_grants                                u:object_r:uri_grants_service:s0
+diff --git a/public/service.te b/public/service.te
+index b32314d..21aadba 100644
+--- a/public/service.te
++++ b/public/service.te
+@@ -240,6 +240,7 @@ type trust_service, app_api_service, system_server_service, service_manager_type
+ type tv_iapp_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type tv_input_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type tv_tuner_resource_mgr_service, app_api_service, system_server_service, service_manager_type;
++type uhf_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type uimode_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+ type updatelock_service, system_api_service, system_server_service, service_manager_type;
+ type uri_grants_service, app_api_service, ephemeral_app_api_service, system_server_service, service_manager_type;
+-- 
+2.34.1
+

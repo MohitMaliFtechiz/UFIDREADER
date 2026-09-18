@@ -1,0 +1,88 @@
+From 5686dc056a6c80f40c30033842e89cf8f0e56132 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 16:04:39 +0200
+Subject: [PATCH 15/15] uhf: give ro.vendor.uhf.device its own property type
+
+Real gap, reported from actual dumpsys output: it printed the default
+device path instead of the configured one. Traced to a sepolicy
+limitation in the previous commit's fix, not a Java bug: on this tree's
+compatible_property_only (Treble) build,
+system/sepolicy/public/property.te resolves vendor_default_prop through
+vendor_internal_prop, which carries
+`neverallow { coredomain -init -dumpstate } vendor_default_prop:file no_rw_file_perms;`.
+system_server is coredomain, so it could never have been granted a read
+on vendor_default_prop no matter what get_prop() rule was added for it -
+UhfService#dump()'s SystemProperties.get() call was always going to be
+silently denied and fall back to its own default argument, which looks
+identical to the property never having been set.
+
+Declared a dedicated uhf_prop type instead, via vendor_public_prop - a
+real, precedented macro in this tree
+(device/rockchip/common/sepolicy/rknn/propery.te does the same shape for
+its own property, with vendor_internal_prop since that one genuinely is
+vendor-only). vendor_public_prop carries no such neverallow, so both
+hal_uhf_default (which already needed this to read the property at all -
+see the previous commit) and system_server (for dumpsys) can be granted
+get_prop on it directly. New property_contexts entry maps the exact key
+ro.vendor.uhf.device to it - not a prefix, since this is one specific
+board-configuration property, not a family needing a shared bucket.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/sepolicy/hal_uhf.te        | 27 ++++++++++++++++---------
+ aidl/default/sepolicy/property_contexts |  3 +++
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+ create mode 100644 aidl/default/sepolicy/property_contexts
+
+diff --git a/aidl/default/sepolicy/hal_uhf.te b/aidl/default/sepolicy/hal_uhf.te
+index e60d227..ce7255f 100644
+--- a/aidl/default/sepolicy/hal_uhf.te
++++ b/aidl/default/sepolicy/hal_uhf.te
+@@ -39,18 +39,25 @@ allow hal_uhf_default usb_serial_device:chr_file rw_file_perms;
+ type uhf_device, dev_type, file_type;
+ allow hal_uhf_default uhf_device:chr_file rw_file_perms;
+ 
+-# ro.vendor.uhf.device (UhfReader.cpp) needs an explicit grant like every other property read: the
+-# ro.vendor. prefix maps to vendor_default_prop in system/sepolicy/private/property_contexts, and
+-# nothing in init_daemon_domain/binder_use/hal_server_domain above grants generic property-file
+-# read access — confirmed by reading te_macros' own get_prop() definition and cross-checking that
+-# no baseline HAL macro already includes it. Without this, GetProperty()'s read is denied and
+-# silently returns the "not set" case, i.e. the /dev/ttyUSB0 default - the exact kind of failure
+-# that would look identical to the property never having been set at all, and is worth avoiding
+-# before it costs a build-flash-test cycle to notice.
+-get_prop(hal_uhf_default, vendor_default_prop)
++# ro.vendor.uhf.device (UhfReader.cpp) needs its own property type, not vendor_default_prop: on
++# this tree's compatible_property_only (Treble) build, vendor_default_prop resolves through
++# vendor_internal_prop (system/sepolicy/public/property.te), which carries
++# `neverallow { coredomain -init -dumpstate } vendor_default_prop:file no_rw_file_perms;` —
++# system_server (coredomain) could never be granted a read on it, which UhfService's dumpsys
++# needs (see below). A dedicated type declared with vendor_public_prop (a real, precedented
++# pattern in this tree — device/rockchip/common/sepolicy/rknn/propery.te does the same for its own
++# property, just with vendor_internal_prop since that one genuinely is vendor-only) has no such
++# restriction: readable by any domain explicitly granted get_prop, exactly what a single
++# board-configuration property that both the HAL and system_server's diagnostics need to read
++# actually calls for.
++vendor_public_prop(uhf_prop)
++get_prop(hal_uhf_default, uhf_prop)
+ 
+ # system_server is a client of this HAL (UhfHalTransport binds to rockchip.uhf.aidl.IUhfReader),
+ # but system_server must NOT itself hold the device node open — that is exactly the Treble
+ # layering violation §3.2 exists to avoid. hal_client_domain grants Binder-call permission only;
+-# it grants nothing over uhf_device.
++# it grants nothing over uhf_device. It also needs no property grant of its own for the HAL's
++# purposes — the one below is solely for UhfService#dump() to report the configured path (see its
++# own comment on why that's worth doing from Java at all instead of asking the HAL over Binder).
+ hal_client_domain(system_server, hal_uhf)
++get_prop(system_server, uhf_prop)
+diff --git a/aidl/default/sepolicy/property_contexts b/aidl/default/sepolicy/property_contexts
+new file mode 100644
+index 0000000..f27fefe
+--- /dev/null
++++ b/aidl/default/sepolicy/property_contexts
+@@ -0,0 +1,3 @@
++# UHF-SRS-001. Exact key, not a prefix: this is one specific board-configuration property
++# (UhfReader.cpp's device path override), not a family of properties needing a shared bucket.
++ro.vendor.uhf.device                       u:object_r:uhf_prop:s0
+-- 
+2.34.1
+

@@ -1,7 +1,7 @@
 From ba7985bc3afa327504994960e65085445e07369b Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:35:55 +0200
-Subject: [PATCH 10/13] uhf: correct the rockchip.uhf.aidl-java module name to
+Subject: [PATCH 10/17] uhf: correct the rockchip.uhf.aidl-java module name to
  rockchip.uhf.aidl-V1-java
 
 Real build failure, found by actually running the build (not by

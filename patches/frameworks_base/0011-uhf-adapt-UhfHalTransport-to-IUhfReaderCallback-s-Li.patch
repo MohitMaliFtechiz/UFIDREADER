@@ -1,7 +1,7 @@
 From 6ca2f5679015b85fb0df746ca131be74385663cc Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:40:51 +0200
-Subject: [PATCH 11/13] uhf: adapt UhfHalTransport to IUhfReaderCallback's
+Subject: [PATCH 11/17] uhf: adapt UhfHalTransport to IUhfReaderCallback's
  List<byte[]> change
 
 Companion fix to hardware/rockchip/uhf's IUhfReaderCallback.aidl commit

@@ -1,0 +1,58 @@
+From d341a0c2d970ab1a03ceb7d58e32cbbfe35448ca Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 16:04:16 +0200
+Subject: [PATCH 14/15] uhf: fix the CRC16 polynomial to match the platform's
+ corrected value
+
+Companion to frameworks/base's fix confirming the real polynomial is
+0x8408 (proven back to back on real hardware against the previous
+CRC-16/MODBUS guess, poly 0xA001 - see that commit for the full byte-
+level proof). This header is a deliberate, line-for-line-equivalent port
+of com.android.server.uhf.UhfProtocol's CRC16 logic, and per its own
+header comment, when the two ever diverge the Java version is the source
+of truth to re-port from, not to fix independently - done exactly that
+way here.
+
+Still not independently build-tested in C++ in this pass (no build of
+this HAL has been attempted from this environment), same as every other
+change to this file - its correctness rests on being a faithful port of
+the now-hardware-confirmed Java algorithm.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ aidl/default/UhfWireProtocol.h | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/aidl/default/UhfWireProtocol.h b/aidl/default/UhfWireProtocol.h
+index 762733f..a36f1a8 100644
+--- a/aidl/default/UhfWireProtocol.h
++++ b/aidl/default/UhfWireProtocol.h
+@@ -40,8 +40,14 @@ namespace uhf {
+ constexpr int kMinLenField = 4;
+ constexpr int kMaxLenField = 0xFF;
+ constexpr int kAddressBroadcast = 0xFF;
+-constexpr uint16_t kCrc16Init = 0xFFFF; // CRC-16/MODBUS; see UhfProtocol.java's doc on this being
+-                                         // an inference pending R1, isolated to one constant.
++// Confirmed on real hardware, not an inference: poly 0x8408 (reflected form of 0x1021), init
++// 0xFFFF, no xorout. The MODBUS guess (poly 0xA001) was wrong - proven back to back on the wire
++// with a real reader, HAL stopped: frame 04 ff 21 with the MODBUS CRC (b1 e9) was silently
++// ignored; the same frame with this CRC (19 95) got a full reply. See UhfProtocol.java's doc for
++// the exact byte-level proof. Only this one constant differs from the MODBUS algorithm - same
++// init, same reflected/LSB-first structure - which is exactly why this was ever isolated to one
++// constant in the first place.
++constexpr uint16_t kCrc16Init = 0xFFFF;
+ 
+ inline uint16_t crc16(const uint8_t* data, size_t length) {
+     uint32_t crc = kCrc16Init;
+@@ -51,7 +57,7 @@ inline uint16_t crc16(const uint8_t* data, size_t length) {
+             bool lsbSet = (crc & 0x0001) != 0;
+             crc >>= 1;
+             if (lsbSet) {
+-                crc ^= 0xA001;
++                crc ^= 0x8408;
+             }
+         }
+     }
+-- 
+2.34.1
+

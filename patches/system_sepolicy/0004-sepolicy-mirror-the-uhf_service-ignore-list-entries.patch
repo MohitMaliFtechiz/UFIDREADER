@@ -1,0 +1,86 @@
+From 25a816238da189a74f8d5f3634023f3b44a9943c Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 13:30:00 +0200
+Subject: [PATCH] sepolicy: mirror the uhf_service ignore-list entries into
+ prebuilts/api/34.0
+
+Real build failure, found by actually running the build after the
+previous commit: sepolicy_freeze_test diffs system/sepolicy/private in
+full against prebuilts/api/34.0/private, which includes
+compat/*/*.ignore.cil - the same class of gap the two earlier
+freeze_test/service.te and service_contexts fixes in this series covered
+for the other affected files. Mirrors the identical uhf_service addition
+into all five prebuilts/api/34.0/private/compat/*/*.ignore.cil files.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ prebuilts/api/34.0/private/compat/29.0/29.0.ignore.cil | 1 +
+ prebuilts/api/34.0/private/compat/30.0/30.0.ignore.cil | 1 +
+ prebuilts/api/34.0/private/compat/31.0/31.0.ignore.cil | 1 +
+ prebuilts/api/34.0/private/compat/32.0/32.0.ignore.cil | 1 +
+ prebuilts/api/34.0/private/compat/33.0/33.0.ignore.cil | 1 +
+ 5 files changed, 5 insertions(+)
+
+diff --git a/prebuilts/api/34.0/private/compat/29.0/29.0.ignore.cil b/prebuilts/api/34.0/private/compat/29.0/29.0.ignore.cil
+index e40888d..f9d6e46 100644
+--- a/prebuilts/api/34.0/private/compat/29.0/29.0.ignore.cil
++++ b/prebuilts/api/34.0/private/compat/29.0/29.0.ignore.cil
+@@ -112,6 +112,7 @@
+     traced_perf_enabled_prop
+     traced_perf_socket
+     timezonedetector_service
++    uhf_service
+     untrusted_app_29
+     usb_serial_device
+     userspace_reboot_config_prop
+diff --git a/prebuilts/api/34.0/private/compat/30.0/30.0.ignore.cil b/prebuilts/api/34.0/private/compat/30.0/30.0.ignore.cil
+index 0a3d2e9..7ae7a15 100644
+--- a/prebuilts/api/34.0/private/compat/30.0/30.0.ignore.cil
++++ b/prebuilts/api/34.0/private/compat/30.0/30.0.ignore.cil
+@@ -139,6 +139,7 @@
+     task_profiles_api_file
+     texttospeech_service
+     translation_service
++    uhf_service
+     update_engine_stable_service
+     userdata_sysdev
+     userspace_reboot_metadata_file
+diff --git a/prebuilts/api/34.0/private/compat/31.0/31.0.ignore.cil b/prebuilts/api/34.0/private/compat/31.0/31.0.ignore.cil
+index 0e39f3e..54d2f48 100644
+--- a/prebuilts/api/34.0/private/compat/31.0/31.0.ignore.cil
++++ b/prebuilts/api/34.0/private/compat/31.0/31.0.ignore.cil
+@@ -39,6 +39,7 @@
+     tare_service
+     transformer_service
+     proc_watermark_boost_factor
++    uhf_service
+     untrusted_app_30
+     proc_vendor_sched
+     sdk_sandbox_service
+diff --git a/prebuilts/api/34.0/private/compat/32.0/32.0.ignore.cil b/prebuilts/api/34.0/private/compat/32.0/32.0.ignore.cil
+index 43ce0a1..55da1f8 100644
+--- a/prebuilts/api/34.0/private/compat/32.0/32.0.ignore.cil
++++ b/prebuilts/api/34.0/private/compat/32.0/32.0.ignore.cil
+@@ -75,6 +75,7 @@
+     system_user_mode_emulation_prop
+     tare_service
+     tv_iapp_service
++    uhf_service
+     untrusted_app_30
+     vendor_uuid_mapping_config_file
+     vendor_vm_data_file
+diff --git a/prebuilts/api/34.0/private/compat/33.0/33.0.ignore.cil b/prebuilts/api/34.0/private/compat/33.0/33.0.ignore.cil
+index 7cbb574..6d6dd8f 100644
+--- a/prebuilts/api/34.0/private/compat/33.0/33.0.ignore.cil
++++ b/prebuilts/api/34.0/private/compat/33.0/33.0.ignore.cil
+@@ -73,6 +73,7 @@
+     tuner_server_ctl_prop
+     ublk_block_device
+     ublk_control_device
++    uhf_service
+     usb_uvc_enabled_prop
+     virtual_face_hal_prop
+     virtual_fingerprint_hal_prop
+-- 
+2.34.1
+

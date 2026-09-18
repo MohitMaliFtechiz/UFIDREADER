@@ -1,7 +1,7 @@
 From 032d7891ffd4629517ea71e53ea5224c5351e125 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 11:05:24 +0200
-Subject: [PATCH 08/10] uhf: fix rockchip::uhf:: name lookup in UhfReader.cpp
+Subject: [PATCH 08/15] uhf: fix rockchip::uhf:: name lookup in UhfReader.cpp
  via explicit using-declarations
 
 Real C++ compile error, found by actually building the HAL for the first

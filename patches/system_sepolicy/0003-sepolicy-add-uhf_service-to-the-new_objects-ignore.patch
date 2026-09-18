@@ -1,0 +1,99 @@
+From 5a5732751374a51bc2637a0593298a5baf42abf7 Mon Sep 17 00:00:00 2001
+From: AOSP RK3576 Baseline <uhf-platform@localbuild>
+Date: Fri, 18 Sep 2026 13:24:58 +0200
+Subject: [PATCH] sepolicy: add uhf_service to the new_objects ignore list for
+ API 29-33
+
+Real build failure, found by actually running the build after the
+previous commit's fixes got past sepolicy_freeze_test and
+fuzzer_bindings_test:
+
+  SELinux: The following public types were found added to the policy
+  without an entry into the compatibility mapping file(s) found in
+  private/compat/V.v/V.v[.ignore].cil, where V.v is the latest API level.
+  uhf_service
+
+treble_sepolicy_tests_{29,30,31,32,33}.0 all failed with this. Every
+public type has to be reachable from every older API level's
+compatibility mapping, either by mapping it to something that existed
+back then, or - for a type with no analogue in that older policy, which
+uhf_service is - by listing it in that level's new_objects ignore set,
+exactly the mechanism ondevicepersonalization_system_service,
+uwb_service, and usb_serial_device already use in these same files for
+the same reason. Added uhf_service alongside them in all five
+29.0.ignore.cil through 33.0.ignore.cil files (there is no 34.0 compat
+directory - 34.0 is this tree's current/unfrozen level, so it needs no
+self-mapping).
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+---
+ private/compat/29.0/29.0.ignore.cil | 1 +
+ private/compat/30.0/30.0.ignore.cil | 1 +
+ private/compat/31.0/31.0.ignore.cil | 1 +
+ private/compat/32.0/32.0.ignore.cil | 1 +
+ private/compat/33.0/33.0.ignore.cil | 1 +
+ 5 files changed, 5 insertions(+)
+
+diff --git a/private/compat/29.0/29.0.ignore.cil b/private/compat/29.0/29.0.ignore.cil
+index e40888d..f9d6e46 100644
+--- a/private/compat/29.0/29.0.ignore.cil
++++ b/private/compat/29.0/29.0.ignore.cil
+@@ -112,6 +112,7 @@
+     traced_perf_enabled_prop
+     traced_perf_socket
+     timezonedetector_service
++    uhf_service
+     untrusted_app_29
+     usb_serial_device
+     userspace_reboot_config_prop
+diff --git a/private/compat/30.0/30.0.ignore.cil b/private/compat/30.0/30.0.ignore.cil
+index 0a3d2e9..7ae7a15 100644
+--- a/private/compat/30.0/30.0.ignore.cil
++++ b/private/compat/30.0/30.0.ignore.cil
+@@ -139,6 +139,7 @@
+     task_profiles_api_file
+     texttospeech_service
+     translation_service
++    uhf_service
+     update_engine_stable_service
+     userdata_sysdev
+     userspace_reboot_metadata_file
+diff --git a/private/compat/31.0/31.0.ignore.cil b/private/compat/31.0/31.0.ignore.cil
+index 0e39f3e..54d2f48 100644
+--- a/private/compat/31.0/31.0.ignore.cil
++++ b/private/compat/31.0/31.0.ignore.cil
+@@ -39,6 +39,7 @@
+     tare_service
+     transformer_service
+     proc_watermark_boost_factor
++    uhf_service
+     untrusted_app_30
+     proc_vendor_sched
+     sdk_sandbox_service
+diff --git a/private/compat/32.0/32.0.ignore.cil b/private/compat/32.0/32.0.ignore.cil
+index 43ce0a1..55da1f8 100644
+--- a/private/compat/32.0/32.0.ignore.cil
++++ b/private/compat/32.0/32.0.ignore.cil
+@@ -75,6 +75,7 @@
+     system_user_mode_emulation_prop
+     tare_service
+     tv_iapp_service
++    uhf_service
+     untrusted_app_30
+     vendor_uuid_mapping_config_file
+     vendor_vm_data_file
+diff --git a/private/compat/33.0/33.0.ignore.cil b/private/compat/33.0/33.0.ignore.cil
+index 7cbb574..6d6dd8f 100644
+--- a/private/compat/33.0/33.0.ignore.cil
++++ b/private/compat/33.0/33.0.ignore.cil
+@@ -73,6 +73,7 @@
+     tuner_server_ctl_prop
+     ublk_block_device
+     ublk_control_device
++    uhf_service
+     usb_uvc_enabled_prop
+     virtual_face_hal_prop
+     virtual_fingerprint_hal_prop
+-- 
+2.34.1
+

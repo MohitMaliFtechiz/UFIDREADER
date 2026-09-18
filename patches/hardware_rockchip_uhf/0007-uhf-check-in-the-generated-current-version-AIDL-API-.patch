@@ -1,7 +1,7 @@
 From 69bbbe642be720da284fca93666c474acc1d2d43 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:48:38 +0200
-Subject: [PATCH 07/10] uhf: check in the generated current-version AIDL API
+Subject: [PATCH 07/15] uhf: check in the generated current-version AIDL API
  dump
 
 Adds hardware/rockchip/uhf/aidl/aidl_api/rockchip.uhf.aidl/current/,

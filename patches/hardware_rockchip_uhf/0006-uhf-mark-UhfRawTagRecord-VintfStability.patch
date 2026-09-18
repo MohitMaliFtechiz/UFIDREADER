@@ -1,7 +1,7 @@
 From 45751f36f13522494f040c1c4e7e18fb86df0bee Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:47:53 +0200
-Subject: [PATCH 06/10] uhf: mark UhfRawTagRecord @VintfStability
+Subject: [PATCH 06/15] uhf: mark UhfRawTagRecord @VintfStability
 
 Real compiler failure, found by actually running
 `m rockchip.uhf.aidl-update-api` again after the previous commit added

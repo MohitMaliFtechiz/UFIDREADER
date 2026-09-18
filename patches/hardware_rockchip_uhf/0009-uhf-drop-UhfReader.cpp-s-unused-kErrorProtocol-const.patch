@@ -1,7 +1,7 @@
 From 971014a0f99bdad73aeea014875fba81102f476f Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 11:10:19 +0200
-Subject: [PATCH 09/10] uhf: drop UhfReader.cpp's unused kErrorProtocol
+Subject: [PATCH 09/15] uhf: drop UhfReader.cpp's unused kErrorProtocol
  constant
 
 Real compile error, found by actually compiling this file (the previous

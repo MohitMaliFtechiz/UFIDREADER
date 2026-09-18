@@ -1,7 +1,7 @@
 From 9227d7a00786b6444815c77abd6a299d7ab8c722 Mon Sep 17 00:00:00 2001
 From: AOSP RK3576 Baseline <uhf-platform@localbuild>
 Date: Thu, 17 Sep 2026 10:14:12 +0200
-Subject: [PATCH 02/10] uhf: drop the premature versions_with_info freeze
+Subject: [PATCH 02/15] uhf: drop the premature versions_with_info freeze
  declaration
 
 Real build failure, found by actually running the build (not by inspection):
