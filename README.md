@@ -67,6 +67,7 @@ sdk/                          Plain source (not a patch) — same uhf-sdk/sample
                               without an AOSP checkout
 apps/UhfTestApp/              Plain source (not a patch) — the standalone Soong platform test app (see below)
 dist/uhf-sdk-1.0.0.aar        A real, compiled AAR built from sdk/ (see "The AAR" below)
+dist/uhf-sdk-1.0.0-docs.pdf   Standalone PDF developer documentation (see "PDF documentation" below)
 docs/
   UHF-SRS-001.html            The software requirements spec this patch series implements
   api/                        Generated Javadoc HTML for the SDK's public Java API
@@ -126,6 +127,17 @@ functions (`inventorySuspend()`, `tagFlow()`) aren't in this Javadoc — Dokka w
 tool for those and isn't available here either — but they're documented with KDoc comments
 in-source (`sdk/uhf-sdk/src/main/kotlin/.../UhfSdkKt.kt`) and in `uhf-sdk/README.md`'s integration
 guide.
+
+### PDF documentation
+
+`dist/uhf-sdk-1.0.0-docs.pdf` is a standalone, print/share-friendly developer guide for the SDK —
+overview, the full integration guide (permissions, the antenna/throughput tradeoff, the RF power
+ceiling, offline development), the compatibility matrix, a complete API reference (every
+`UhfSdkSession` method, grouped and transcribed directly from source — not summarized or
+paraphrased), `UhfException`'s error codes, the Kotlin extension functions, a sample usage
+walkthrough, and the same verified/unverified breakdown as everywhere else in this project. It
+doesn't replace `uhf-sdk/README.md` (that stays the in-repo source of truth) — it exists for
+handing to someone who wants one file, not a repo to browse.
 
 ## Applying the patches
 
